@@ -79,7 +79,7 @@ app.post('/merge', async (req, res) => {
         } else {
           outputOptions.push('-c:a copy');
         }
-        const subtitleStyle = req.body.subtitleStyle || "FontSize=14,PrimaryColour=&Hffffff&,OutlineColour=&H000000&,Outline=1,Alignment=2,MarginV=20";
+        const subtitleStyle = req.body.subtitleStyle || "FontSize=14,Alignment=2,MarginV=20";
         if (srtEscaped) outputOptions.push("-vf subtitles='" + srtEscaped + "':force_style='" + subtitleStyle + "'");
         cmd.outputOptions(outputOptions)
           .on('error', err => reject(err))
