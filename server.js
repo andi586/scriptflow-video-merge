@@ -22,8 +22,8 @@ app.post('/merge', async (req, res) => {
   let workDir = null;
   try {
     const { projectId, videoUrls, audioUrls, srtContent } = req.body || {};
-    if (!projectId || !videoUrls?.length || !audioUrls?.length || !srtContent) {
-      return res.status(400).json({ success: false, error: 'Missing required fields' });
+    if (!projectId || !videoUrls?.length) {
+      return res.status(400).json({ success: false, error: 'Missing required fields: projectId and videoUrls are required' });
     }
 
     workDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'merge-'));
@@ -36,34 +36,66 @@ app.post('/merge', async (req, res) => {
       videoPaths.push(out);
     }
 
-    const audioPaths = [];
-    for (let i = 0; i < audioUrls.length; i++) {
-      const out = path.join(workDir, 'a' + String(i).padStart(3,'0') + '.mp3');
-      await download(audioUrls[i], out);
-      audioPaths.push(out);
-    }
-
-    const srtPath = path.join(workDir, 'sub.srt');
-    await fsp.writeFile(srtPath, srtContent, 'utf8');
-
     const concatVideo = path.join(workDir, 'cv.mp4');
     await concatMedia(videoPaths, path.join(workDir, 'vlist.txt'), concatVideo);
 
-    const concatAudio = path.join(workDir, 'ca.mp3');
-    await concatMedia(audioPaths, path.join(workDir, 'alist.txt'), concatAudio);
-
     const finalPath = path.join(workDir, 'final.mp4');
-    const srtEscaped = path.resolve(srtPath).replace(/\\/g,'/').replace(/:/g,'\\:').replace(/'/g,"\\'");
+    const hasAudio = Array.isArray(audioUrls) && audioUrls.length > 0;
+    const hasSrt = typeof srtContent === 'string' && srtContent.trim().length > 0;
 
-    await new Promise((resolve, reject) => {
-      ffmpeg()
-        .input(concatVideo)
-        .input(concatAudio)
-        .outputOptions(['-map 0:v:0','-map 1:a:0','-c:v libx264','-preset veryfast','-crf 23','-c:a aac','-b:a 192k','-shortest',"-vf subtitles='" + srtEscaped + "'"])
-        .on('error', err => reject(err))
-        .on('end', resolve)
-        .save(finalPath);
-    });
+    if (hasAudio || hasSrt) {
+      // Full merge: video + audio + optional subtitles
+      const audioPaths = [];
+      if (hasAudio) {
+        for (let i = 0; i < audioUrls.length; i++) {
+          const out = path.join(workDir, 'a' + String(i).padStart(3,'0') + '.mp3');
+          await download(audioUrls[i], out);
+          audioPaths.push(out);
+        }
+      }
+
+      let concatAudio = null;
+      if (audioPaths.length > 0) {
+        concatAudio = path.join(workDir, 'ca.mp3');
+        await concatMedia(audioPaths, path.join(workDir, 'alist.txt'), concatAudio);
+      }
+
+      let srtPath = null;
+      if (hasSrt) {
+        srtPath = path.join(workDir, 'sub.srt');
+        await fsp.writeFile(srtPath, srtContent, 'utf8');
+      }
+
+      const srtEscaped = srtPath
+        ? path.resolve(srtPath).replace(/\\/g,'/').replace(/:/g,'\\:').replace(/'/g,"\\'")
+        : null;
+
+      await new Promise((resolve, reject) => {
+        const cmd = ffmpeg().input(concatVideo);
+        if (concatAudio) cmd.input(concatAudio);
+        const outputOptions = ['-c:v libx264','-preset veryfast','-crf 23'];
+        if (concatAudio) {
+          outputOptions.push('-map 0:v:0','-map 1:a:0','-c:a aac','-b:a 192k','-shortest');
+        } else {
+          outputOptions.push('-c:a copy');
+        }
+        if (srtEscaped) outputOptions.push("-vf subtitles='" + srtEscaped + "'");
+        cmd.outputOptions(outputOptions)
+          .on('error', err => reject(err))
+          .on('end', resolve)
+          .save(finalPath);
+      });
+    } else {
+      // Video-only merge: just copy streams
+      await new Promise((resolve, reject) => {
+        ffmpeg()
+          .input(concatVideo)
+          .outputOptions(['-c copy'])
+          .on('error', err => reject(err))
+          .on('end', resolve)
+          .save(finalPath);
+      });
+    }
 
     const buf = await fsp.readFile(finalPath);
     const storagePath = projectId + '/final-' + Date.now() + '.mp4';
