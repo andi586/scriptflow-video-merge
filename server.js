@@ -17,6 +17,38 @@ const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SER
 
 app.get('/health', (_req, res) => res.json({ success: true, ffmpegPath: ffmpegInstaller.path }));
 
+// Build a 3-second intro card video using FFmpeg drawtext
+async function buildIntroCard({ workDir, fontPath, projectTitle, episodeNum, episodeTitle }) {
+  const introCardPath = path.join(workDir, 'introcard.mp4');
+  const hasFontFile = await fsp.access(fontPath).then(() => true).catch(() => false);
+
+  const escapeTxt = (s) => (s || '').replace(/'/g, "\u2019").replace(/:/g, '\\:').replace(/\\/g, '/');
+
+  const titleText = escapeTxt(projectTitle || 'ScriptFlow');
+  const episodeText = escapeTxt('Episode ' + (episodeNum || 1) + (episodeTitle ? ' \u00b7 ' + episodeTitle : ''));
+
+  const fontArg = hasFontFile ? (':fontfile=' + fontPath.replace(/\\/g, '/').replace(/:/g, '\\:')) : '';
+
+  const vf = [
+    "color=black:size=1080x1920:duration=3:rate=30[bg]",
+    "[bg]drawtext=text='" + titleText + "'" + fontArg + ":fontcolor=white:fontsize=60:x=(w-text_w)/2:y=(h/2)-60[t1]",
+    "[t1]drawtext=text='" + episodeText + "'" + fontArg + ":fontcolor=#D4A017:fontsize=40:x=(w-text_w)/2:y=(h/2)+20[out]"
+  ].join(';');
+
+  await new Promise((resolve, reject) => {
+    ffmpeg()
+      .input('color=black:size=1080x1920:duration=3:rate=30')
+      .inputOptions(['-f lavfi'])
+      .complexFilter(vf, 'out')
+      .outputOptions(['-c:v libx264', '-preset veryfast', '-crf 23', '-pix_fmt yuv420p', '-an'])
+      .on('error', reject)
+      .on('end', resolve)
+      .save(introCardPath);
+  });
+
+  return introCardPath;
+}
+
 // Build a 5-second end card video using FFmpeg drawtext
 async function buildEndCard({ workDir, fontPath, projectTitle, episodeNum, episodeTitle }) {
   const endCardPath = path.join(workDir, 'endcard.mp4');
@@ -167,8 +199,17 @@ app.post('/merge', async (req, res) => {
       });
     }
 
-    // Build end card and append to merged video
+    // Build intro card and end card
     const fontPath = path.join(__dirname, 'assets', 'fonts', 'Inter-Regular.ttf');
+
+    let introCardPath = null;
+    try {
+      introCardPath = await buildIntroCard({ workDir, fontPath, projectTitle, episodeNum, episodeTitle });
+      console.log('[' + requestId + '] Intro card built: ' + introCardPath);
+    } catch (icErr) {
+      console.warn('[' + requestId + '] Intro card build failed (skipping): ' + icErr.message);
+    }
+
     let endCardPath = null;
     try {
       endCardPath = await buildEndCard({ workDir, fontPath, projectTitle, episodeNum, episodeTitle });
@@ -177,11 +218,16 @@ app.post('/merge', async (req, res) => {
       console.warn('[' + requestId + '] End card build failed (skipping): ' + ecErr.message);
     }
 
+    // Assemble: [intro card] + merged + [end card]
     const finalPath = path.join(workDir, 'final.mp4');
-    if (endCardPath) {
-      await concatMedia([mergedPath, endCardPath], path.join(workDir, 'flist.txt'), finalPath);
+    const partsToConcat = [];
+    if (introCardPath) partsToConcat.push(introCardPath);
+    partsToConcat.push(mergedPath);
+    if (endCardPath) partsToConcat.push(endCardPath);
+
+    if (partsToConcat.length > 1) {
+      await concatMedia(partsToConcat, path.join(workDir, 'flist.txt'), finalPath);
     } else {
-      // No end card — just rename merged as final
       await fsp.rename(mergedPath, finalPath);
     }
 
