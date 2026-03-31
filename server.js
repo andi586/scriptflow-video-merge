@@ -101,7 +101,8 @@ app.post('/merge', async (req, res) => {
         try {
           bgmPath = path.join(workDir, 'bgm.mp3');
           await download(bgmUrl, bgmPath);
-          console.log('[' + requestId + '] BGM downloaded: ' + bgmPath);
+          const bgmStat = await fsp.stat(bgmPath);
+          console.log('[' + requestId + '] BGM downloaded:', bgmPath, 'size:', bgmStat.size, 'bytes');
         } catch (bgmErr) {
           console.warn('[' + requestId + '] BGM download failed (skipping): ' + bgmErr.message);
           bgmPath = null;
@@ -121,7 +122,7 @@ app.post('/merge', async (req, res) => {
       await new Promise((resolve, reject) => {
         const cmd = ffmpeg().input(concatVideo);
         if (concatAudio) cmd.input(concatAudio);
-        if (bgmPath) cmd.inputOptions(['-stream_loop', '-1']).input(bgmPath);
+        if (bgmPath) cmd.input(bgmPath);
 
         const outputOptions = ['-c:v libx264', '-preset veryfast', '-crf 23'];
 
@@ -130,31 +131,26 @@ app.post('/merge', async (req, res) => {
         const subtitleStyle = req.body.subtitleStyle || "FontSize=8,Alignment=2,MarginV=20";
 
         if (concatAudio && bgmPath) {
-          // Three-track mix: video + dialogue (full volume) + BGM (ducked to 12%)
-          // Subtitles must be inside filter_complex to avoid conflict with -filter_complex
-          let filterComplex;
-          if (srtEscaped) {
-            filterComplex = `[0:v]subtitles='${srtEscaped}':force_style='${subtitleStyle}'[vout];[1:a]volume=1.0[dialogue];[2:a]volume=0.12[bgm];[dialogue][bgm]amix=inputs=2:duration=first:dropout_transition=2[aout]`;
-            outputOptions.push('-filter_complex', filterComplex);
-            outputOptions.push('-map', '[vout]', '-map', '[aout]', '-c:a', 'aac', '-b:a', '192k', '-shortest');
-          } else {
-            filterComplex = `[1:a]volume=1.0[dialogue];[2:a]volume=0.12[bgm];[dialogue][bgm]amix=inputs=2:duration=first:dropout_transition=2[aout]`;
-            outputOptions.push('-filter_complex', filterComplex);
-            outputOptions.push('-map', '0:v:0', '-map', '[aout]', '-c:a', 'aac', '-b:a', '192k', '-shortest');
-          }
+          // Three-track mix: video (input 0) + dialogue audio (input 1) + BGM (input 2, looped)
+          // BGM at 15% volume, looped to match video duration
+          const filterComplex = '[1:a]volume=1.0[dialogue];[2:a]volume=0.15,aloop=loop=-1:size=2147483647[bgm];[dialogue][bgm]amix=inputs=2:duration=first[aout]';
+          outputOptions.push('-filter_complex', filterComplex);
+          outputOptions.push('-map', '0:v', '-map', '[aout]', '-c:a', 'aac', '-b:a', '192k', '-shortest');
+          if (srtEscaped) outputOptions.push("-vf subtitles='" + srtEscaped + "':force_style='" + subtitleStyle + "'");
         } else if (concatAudio) {
           outputOptions.push('-map', '0:v:0', '-map', '1:a:0', '-c:a', 'aac', '-b:a', '192k', '-shortest');
           if (srtEscaped) outputOptions.push("-vf subtitles='" + srtEscaped + "':force_style='" + subtitleStyle + "'");
         } else if (bgmPath) {
           // BGM only (no dialogue audio)
-          outputOptions.push('-filter_complex', '[1:a]volume=0.4[bgm];[bgm]aloop=loop=-1:size=2e+09[aout]');
+          outputOptions.push('-filter_complex', '[1:a]volume=0.4,aloop=loop=-1:size=2147483647[aout]');
           outputOptions.push('-map', '0:v:0', '-map', '[aout]', '-c:a', 'aac', '-b:a', '192k', '-shortest');
         } else {
           outputOptions.push('-c:a', 'copy');
           if (srtEscaped) outputOptions.push("-vf subtitles='" + srtEscaped + "':force_style='" + subtitleStyle + "'");
         }
 
-        cmd.outputOptions(outputOptions)
+        cmd.on('start', (cmdLine) => console.log('[merge] FFmpeg command:', cmdLine))
+          .outputOptions(outputOptions)
           .on('error', err => reject(err))
           .on('end', resolve)
           .save(mergedPath);
