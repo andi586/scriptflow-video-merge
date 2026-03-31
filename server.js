@@ -17,24 +17,7 @@ const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SER
 
 app.get('/health', (_req, res) => res.json({ success: true, ffmpegPath: ffmpegInstaller.path }));
 
-// Resolve font arg for drawtext: prefer /app/assets/fonts (Railway), then local fontPath, then no fontfile
-async function resolveFontArg(localFontPath) {
-  const candidates = [
-    '/app/assets/fonts/Inter-Regular.ttf',
-    localFontPath,
-  ];
-  for (const candidate of candidates) {
-    if (!candidate) continue;
-    const exists = await fsp.access(candidate).then(() => true).catch(() => false);
-    if (exists) {
-      const escaped = candidate.replace(/\\/g, '/').replace(/:/g, '\\:');
-      return ':fontfile=' + escaped;
-    }
-  }
-  return ''; // fallback: FFmpeg built-in font
-}
-
-// Build a 3-second intro card video using FFmpeg drawtext
+// Build a 3-second intro card video using FFmpeg drawtext (no external font dependency)
 async function buildIntroCard({ workDir, fontPath, projectTitle, episodeNum, episodeTitle }) {
   const introCardPath = path.join(workDir, 'introcard.mp4');
 
@@ -43,12 +26,10 @@ async function buildIntroCard({ workDir, fontPath, projectTitle, episodeNum, epi
   const titleText = escapeTxt(projectTitle || 'ScriptFlow');
   const episodeText = escapeTxt('Episode ' + (episodeNum || 1) + (episodeTitle ? ' \u00b7 ' + episodeTitle : ''));
 
-  const fontArg = await resolveFontArg(fontPath);
-
   const vf = [
     "color=black:size=1080x1920:duration=3:rate=30[bg]",
-    "[bg]drawtext=text='" + titleText + "'" + fontArg + ":fontcolor=white:fontsize=60:x=(w-text_w)/2:y=(h/2)-60[t1]",
-    "[t1]drawtext=text='" + episodeText + "'" + fontArg + ":fontcolor=#D4A017:fontsize=40:x=(w-text_w)/2:y=(h/2)+20[out]"
+    "[bg]drawtext=text='" + titleText + "':fontcolor=white:fontsize=60:x=(w-tw)/2:y=(h-th)/2-60[t1]",
+    "[t1]drawtext=text='" + episodeText + "':fontcolor=#D4A017:fontsize=40:x=(w-tw)/2:y=(h-th)/2+20[out]"
   ].join(';');
 
   await new Promise((resolve, reject) => {
@@ -87,13 +68,11 @@ async function buildEndCard({ workDir, fontPath, projectTitle, episodeNum, episo
   const episodeText = escapeTxt('Episode ' + (episodeNum || 1) + (episodeTitle ? ' \u00b7 ' + episodeTitle : ''));
   const handleText = '@wolfemperorai';
 
-  const fontArg = await resolveFontArg(fontPath);
-
   const vf = [
     "color=black:size=1080x1920:duration=5:rate=30[bg]",
-    "[bg]drawtext=text='" + titleText + "'" + fontArg + ":fontcolor=white:fontsize=80:x=(w-text_w)/2:y=(h/2)-120[t1]",
-    "[t1]drawtext=text='" + episodeText + "'" + fontArg + ":fontcolor=white:fontsize=60:x=(w-text_w)/2:y=(h/2)[t2]",
-    "[t2]drawtext=text='" + handleText + "'" + fontArg + ":fontcolor=white:fontsize=40:x=(w-text_w)/2:y=(h/2)+100[out]"
+    "[bg]drawtext=text='" + titleText + "':fontcolor=white:fontsize=80:x=(w-tw)/2:y=(h-th)/2-140[t1]",
+    "[t1]drawtext=text='" + episodeText + "':fontcolor=white:fontsize=60:x=(w-tw)/2:y=(h-th)/2[t2]",
+    "[t2]drawtext=text='" + handleText + "':fontcolor=white:fontsize=40:x=(w-tw)/2:y=(h-th)/2+100[out]"
   ].join(';');
 
   await new Promise((resolve, reject) => {
