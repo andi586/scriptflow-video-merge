@@ -17,17 +17,33 @@ const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SER
 
 app.get('/health', (_req, res) => res.json({ success: true, ffmpegPath: ffmpegInstaller.path }));
 
+// Resolve font arg for drawtext: prefer /app/assets/fonts (Railway), then local fontPath, then no fontfile
+async function resolveFontArg(localFontPath) {
+  const candidates = [
+    '/app/assets/fonts/Inter-Regular.ttf',
+    localFontPath,
+  ];
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    const exists = await fsp.access(candidate).then(() => true).catch(() => false);
+    if (exists) {
+      const escaped = candidate.replace(/\\/g, '/').replace(/:/g, '\\:');
+      return ':fontfile=' + escaped;
+    }
+  }
+  return ''; // fallback: FFmpeg built-in font
+}
+
 // Build a 3-second intro card video using FFmpeg drawtext
 async function buildIntroCard({ workDir, fontPath, projectTitle, episodeNum, episodeTitle }) {
   const introCardPath = path.join(workDir, 'introcard.mp4');
-  const hasFontFile = await fsp.access(fontPath).then(() => true).catch(() => false);
 
   const escapeTxt = (s) => (s || '').replace(/'/g, "\u2019").replace(/:/g, '\\:').replace(/\\/g, '/');
 
   const titleText = escapeTxt(projectTitle || 'ScriptFlow');
   const episodeText = escapeTxt('Episode ' + (episodeNum || 1) + (episodeTitle ? ' \u00b7 ' + episodeTitle : ''));
 
-  const fontArg = hasFontFile ? (':fontfile=' + fontPath.replace(/\\/g, '/').replace(/:/g, '\\:')) : '';
+  const fontArg = await resolveFontArg(fontPath);
 
   const vf = [
     "color=black:size=1080x1920:duration=3:rate=30[bg]",
@@ -64,7 +80,6 @@ async function buildIntroCard({ workDir, fontPath, projectTitle, episodeNum, epi
 // Build a 5-second end card video using FFmpeg drawtext
 async function buildEndCard({ workDir, fontPath, projectTitle, episodeNum, episodeTitle }) {
   const endCardPath = path.join(workDir, 'endcard.mp4');
-  const hasFontFile = await fsp.access(fontPath).then(() => true).catch(() => false);
 
   const escapeTxt = (s) => (s || '').replace(/'/g, "\u2019").replace(/:/g, '\\:').replace(/\\/g, '/');
 
@@ -72,7 +87,7 @@ async function buildEndCard({ workDir, fontPath, projectTitle, episodeNum, episo
   const episodeText = escapeTxt('Episode ' + (episodeNum || 1) + (episodeTitle ? ' \u00b7 ' + episodeTitle : ''));
   const handleText = '@wolfemperorai';
 
-  const fontArg = hasFontFile ? (':fontfile=' + fontPath.replace(/\\/g, '/').replace(/:/g, '\\:')) : '';
+  const fontArg = await resolveFontArg(fontPath);
 
   const vf = [
     "color=black:size=1080x1920:duration=5:rate=30[bg]",
@@ -189,7 +204,7 @@ app.post('/merge', async (req, res) => {
         if (concatAudio && bgmPath) {
           // Three-track mix: video (input 0) + dialogue audio (input 1) + BGM (input 2, looped)
           // BGM at 15% volume, looped to match video duration
-          const filterComplex = '[1:a]volume=1.0[dialogue];[2:a]volume=0.15,aloop=loop=-1:size=2147483647[bgm];[dialogue][bgm]amix=inputs=2:duration=first[aout]';
+          const filterComplex = '[1:a]volume=1.0[dialogue];[2:a]volume=0.28,aloop=loop=-1:size=2147483647[bgm];[dialogue][bgm]amix=inputs=2:duration=first[aout]';
           outputOptions.push('-filter_complex', filterComplex);
           outputOptions.push('-map', '0:v', '-map', '[aout]', '-c:a', 'aac', '-b:a', '192k', '-shortest');
           if (srtEscaped) outputOptions.push("-vf subtitles='" + srtEscaped + "':force_style='" + subtitleStyle + "'");
