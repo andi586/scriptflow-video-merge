@@ -39,8 +39,20 @@ async function buildIntroCard({ workDir, fontPath, projectTitle, episodeNum, epi
     ffmpeg()
       .input('color=black:size=1080x1920:duration=3:rate=30')
       .inputOptions(['-f lavfi'])
+      .input('anullsrc=r=48000:cl=stereo')
+      .inputOptions(['-f lavfi'])
       .complexFilter(vf, 'out')
-      .outputOptions(['-c:v libx264', '-preset veryfast', '-crf 23', '-pix_fmt yuv420p', '-an'])
+      .outputOptions([
+        '-map', '[out]',
+        '-map', '1:a',
+        '-c:v', 'libx264',
+        '-preset', 'veryfast',
+        '-crf', '23',
+        '-pix_fmt', 'yuv420p',
+        '-c:a', 'aac',
+        '-b:a', '192k',
+        '-shortest',
+      ])
       .on('error', reject)
       .on('end', resolve)
       .save(introCardPath);
@@ -73,8 +85,20 @@ async function buildEndCard({ workDir, fontPath, projectTitle, episodeNum, episo
     ffmpeg()
       .input('color=black:size=1080x1920:duration=5:rate=30')
       .inputOptions(['-f lavfi'])
+      .input('anullsrc=r=48000:cl=stereo')
+      .inputOptions(['-f lavfi'])
       .complexFilter(vf, 'out')
-      .outputOptions(['-c:v libx264', '-preset veryfast', '-crf 23', '-pix_fmt yuv420p', '-an'])
+      .outputOptions([
+        '-map', '[out]',
+        '-map', '1:a',
+        '-c:v', 'libx264',
+        '-preset', 'veryfast',
+        '-crf', '23',
+        '-pix_fmt', 'yuv420p',
+        '-c:a', 'aac',
+        '-b:a', '192k',
+        '-shortest',
+      ])
       .on('error', reject)
       .on('end', resolve)
       .save(endCardPath);
