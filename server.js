@@ -55,7 +55,7 @@ app.post('/merge', async (req, res) => {
   const requestId = crypto.randomUUID();
   let workDir = null;
   try {
-    const { projectId, videoUrls, audioUrls, srtContent, projectTitle, episodeNum, episodeTitle } = req.body || {};
+    const { projectId, videoUrls, audioUrls, srtContent, projectTitle, episodeNum, episodeTitle, bgmUrl } = req.body || {};
     if (!projectId || !videoUrls?.length) {
       return res.status(400).json({ success: false, error: 'Missing required fields: projectId and videoUrls are required' });
     }
@@ -76,9 +76,10 @@ app.post('/merge', async (req, res) => {
     const mergedPath = path.join(workDir, 'merged.mp4');
     const hasAudio = Array.isArray(audioUrls) && audioUrls.length > 0;
     const hasSrt = typeof srtContent === 'string' && srtContent.trim().length > 0;
+    const hasBgm = typeof bgmUrl === 'string' && bgmUrl.trim().length > 0;
 
-    if (hasAudio || hasSrt) {
-      // Full merge: video + audio + optional subtitles
+    if (hasAudio || hasSrt || hasBgm) {
+      // Full merge: video + dialogue audio + optional BGM + optional subtitles
       const audioPaths = [];
       if (hasAudio) {
         for (let i = 0; i < audioUrls.length; i++) {
@@ -94,6 +95,19 @@ app.post('/merge', async (req, res) => {
         await concatMedia(audioPaths, path.join(workDir, 'alist.txt'), concatAudio);
       }
 
+      // Download BGM if provided
+      let bgmPath = null;
+      if (hasBgm) {
+        try {
+          bgmPath = path.join(workDir, 'bgm.mp3');
+          await download(bgmUrl, bgmPath);
+          console.log('[' + requestId + '] BGM downloaded: ' + bgmPath);
+        } catch (bgmErr) {
+          console.warn('[' + requestId + '] BGM download failed (skipping): ' + bgmErr.message);
+          bgmPath = null;
+        }
+      }
+
       let srtPath = null;
       if (hasSrt) {
         srtPath = path.join(workDir, 'sub.srt');
@@ -107,14 +121,29 @@ app.post('/merge', async (req, res) => {
       await new Promise((resolve, reject) => {
         const cmd = ffmpeg().input(concatVideo);
         if (concatAudio) cmd.input(concatAudio);
-        const outputOptions = ['-c:v libx264','-preset veryfast','-crf 23'];
-        if (concatAudio) {
-          outputOptions.push('-map 0:v:0','-map 1:a:0','-c:a aac','-b:a 192k','-shortest');
+        if (bgmPath) cmd.input(bgmPath, ['-stream_loop', '-1']);
+
+        const outputOptions = ['-c:v libx264', '-preset veryfast', '-crf 23'];
+
+        console.log('[merge] concatAudio:', !!concatAudio, 'bgmPath:', bgmPath);
+
+        if (concatAudio && bgmPath) {
+          // Three-track mix: video + dialogue (full volume) + BGM (ducked to 12%)
+          outputOptions.push('-filter_complex', '[1:a]volume=1.0[dialogue];[2:a]volume=0.12[bgm];[dialogue][bgm]amix=inputs=2:duration=first:dropout_transition=2[aout]');
+          outputOptions.push('-map', '0:v:0', '-map', '[aout]', '-c:a', 'aac', '-b:a', '192k', '-shortest');
+        } else if (concatAudio) {
+          outputOptions.push('-map', '0:v:0', '-map', '1:a:0', '-c:a', 'aac', '-b:a', '192k', '-shortest');
+        } else if (bgmPath) {
+          // BGM only (no dialogue audio)
+          outputOptions.push('-filter_complex', '[1:a]volume=0.4[bgm];[bgm]aloop=loop=-1:size=2e+09[aout]');
+          outputOptions.push('-map', '0:v:0', '-map', '[aout]', '-c:a', 'aac', '-b:a', '192k', '-shortest');
         } else {
-          outputOptions.push('-c:a copy');
+          outputOptions.push('-c:a', 'copy');
         }
+
         const subtitleStyle = req.body.subtitleStyle || "FontSize=8,Alignment=2,MarginV=20";
         if (srtEscaped) outputOptions.push("-vf subtitles='" + srtEscaped + "':force_style='" + subtitleStyle + "'");
+
         cmd.outputOptions(outputOptions)
           .on('error', err => reject(err))
           .on('end', resolve)
