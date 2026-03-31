@@ -17,11 +17,45 @@ const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SER
 
 app.get('/health', (_req, res) => res.json({ success: true, ffmpegPath: ffmpegInstaller.path }));
 
+// Build a 5-second end card video using FFmpeg drawtext
+async function buildEndCard({ workDir, fontPath, projectTitle, episodeNum, episodeTitle }) {
+  const endCardPath = path.join(workDir, 'endcard.mp4');
+  const hasFontFile = await fsp.access(fontPath).then(() => true).catch(() => false);
+
+  const escapeTxt = (s) => (s || '').replace(/'/g, "\u2019").replace(/:/g, '\\:').replace(/\\/g, '/');
+
+  const titleText = escapeTxt(projectTitle || 'ScriptFlow');
+  const episodeText = escapeTxt('Episode ' + (episodeNum || 1) + (episodeTitle ? ' \u00b7 ' + episodeTitle : ''));
+  const handleText = '@wolfemperorai';
+
+  const fontArg = hasFontFile ? (':fontfile=' + fontPath.replace(/\\/g, '/').replace(/:/g, '\\:')) : '';
+
+  const vf = [
+    "color=black:size=1080x1920:duration=5:rate=30[bg]",
+    "[bg]drawtext=text='" + titleText + "'" + fontArg + ":fontcolor=white:fontsize=80:x=(w-text_w)/2:y=(h/2)-120[t1]",
+    "[t1]drawtext=text='" + episodeText + "'" + fontArg + ":fontcolor=white:fontsize=60:x=(w-text_w)/2:y=(h/2)[t2]",
+    "[t2]drawtext=text='" + handleText + "'" + fontArg + ":fontcolor=white:fontsize=40:x=(w-text_w)/2:y=(h/2)+100[out]"
+  ].join(';');
+
+  await new Promise((resolve, reject) => {
+    ffmpeg()
+      .input('color=black:size=1080x1920:duration=5:rate=30')
+      .inputOptions(['-f lavfi'])
+      .complexFilter(vf, 'out')
+      .outputOptions(['-c:v libx264', '-preset veryfast', '-crf 23', '-pix_fmt yuv420p', '-an'])
+      .on('error', reject)
+      .on('end', resolve)
+      .save(endCardPath);
+  });
+
+  return endCardPath;
+}
+
 app.post('/merge', async (req, res) => {
   const requestId = crypto.randomUUID();
   let workDir = null;
   try {
-    const { projectId, videoUrls, audioUrls, srtContent } = req.body || {};
+    const { projectId, videoUrls, audioUrls, srtContent, projectTitle, episodeNum, episodeTitle } = req.body || {};
     if (!projectId || !videoUrls?.length) {
       return res.status(400).json({ success: false, error: 'Missing required fields: projectId and videoUrls are required' });
     }
@@ -39,7 +73,7 @@ app.post('/merge', async (req, res) => {
     const concatVideo = path.join(workDir, 'cv.mp4');
     await concatMedia(videoPaths, path.join(workDir, 'vlist.txt'), concatVideo);
 
-    const finalPath = path.join(workDir, 'final.mp4');
+    const mergedPath = path.join(workDir, 'merged.mp4');
     const hasAudio = Array.isArray(audioUrls) && audioUrls.length > 0;
     const hasSrt = typeof srtContent === 'string' && srtContent.trim().length > 0;
 
@@ -84,7 +118,7 @@ app.post('/merge', async (req, res) => {
         cmd.outputOptions(outputOptions)
           .on('error', err => reject(err))
           .on('end', resolve)
-          .save(finalPath);
+          .save(mergedPath);
       });
     } else {
       // Video-only merge: just copy streams
@@ -94,8 +128,26 @@ app.post('/merge', async (req, res) => {
           .outputOptions(['-c copy'])
           .on('error', err => reject(err))
           .on('end', resolve)
-          .save(finalPath);
+          .save(mergedPath);
       });
+    }
+
+    // Build end card and append to merged video
+    const fontPath = path.join(__dirname, 'assets', 'fonts', 'Inter-Regular.ttf');
+    let endCardPath = null;
+    try {
+      endCardPath = await buildEndCard({ workDir, fontPath, projectTitle, episodeNum, episodeTitle });
+      console.log('[' + requestId + '] End card built: ' + endCardPath);
+    } catch (ecErr) {
+      console.warn('[' + requestId + '] End card build failed (skipping): ' + ecErr.message);
+    }
+
+    const finalPath = path.join(workDir, 'final.mp4');
+    if (endCardPath) {
+      await concatMedia([mergedPath, endCardPath], path.join(workDir, 'flist.txt'), finalPath);
+    } else {
+      // No end card — just rename merged as final
+      await fsp.rename(mergedPath, finalPath);
     }
 
     const buf = await fsp.readFile(finalPath);
