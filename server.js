@@ -121,28 +121,38 @@ app.post('/merge', async (req, res) => {
       await new Promise((resolve, reject) => {
         const cmd = ffmpeg().input(concatVideo);
         if (concatAudio) cmd.input(concatAudio);
-        if (bgmPath) cmd.input(bgmPath, ['-stream_loop', '-1']);
+        if (bgmPath) cmd.inputOptions(['-stream_loop', '-1']).input(bgmPath);
 
         const outputOptions = ['-c:v libx264', '-preset veryfast', '-crf 23'];
 
         console.log('[merge] concatAudio:', !!concatAudio, 'bgmPath:', bgmPath);
 
+        const subtitleStyle = req.body.subtitleStyle || "FontSize=8,Alignment=2,MarginV=20";
+
         if (concatAudio && bgmPath) {
           // Three-track mix: video + dialogue (full volume) + BGM (ducked to 12%)
-          outputOptions.push('-filter_complex', '[1:a]volume=1.0[dialogue];[2:a]volume=0.12[bgm];[dialogue][bgm]amix=inputs=2:duration=first:dropout_transition=2[aout]');
-          outputOptions.push('-map', '0:v:0', '-map', '[aout]', '-c:a', 'aac', '-b:a', '192k', '-shortest');
+          // Subtitles must be inside filter_complex to avoid conflict with -filter_complex
+          let filterComplex;
+          if (srtEscaped) {
+            filterComplex = `[0:v]subtitles='${srtEscaped}':force_style='${subtitleStyle}'[vout];[1:a]volume=1.0[dialogue];[2:a]volume=0.12[bgm];[dialogue][bgm]amix=inputs=2:duration=first:dropout_transition=2[aout]`;
+            outputOptions.push('-filter_complex', filterComplex);
+            outputOptions.push('-map', '[vout]', '-map', '[aout]', '-c:a', 'aac', '-b:a', '192k', '-shortest');
+          } else {
+            filterComplex = `[1:a]volume=1.0[dialogue];[2:a]volume=0.12[bgm];[dialogue][bgm]amix=inputs=2:duration=first:dropout_transition=2[aout]`;
+            outputOptions.push('-filter_complex', filterComplex);
+            outputOptions.push('-map', '0:v:0', '-map', '[aout]', '-c:a', 'aac', '-b:a', '192k', '-shortest');
+          }
         } else if (concatAudio) {
           outputOptions.push('-map', '0:v:0', '-map', '1:a:0', '-c:a', 'aac', '-b:a', '192k', '-shortest');
+          if (srtEscaped) outputOptions.push("-vf subtitles='" + srtEscaped + "':force_style='" + subtitleStyle + "'");
         } else if (bgmPath) {
           // BGM only (no dialogue audio)
           outputOptions.push('-filter_complex', '[1:a]volume=0.4[bgm];[bgm]aloop=loop=-1:size=2e+09[aout]');
           outputOptions.push('-map', '0:v:0', '-map', '[aout]', '-c:a', 'aac', '-b:a', '192k', '-shortest');
         } else {
           outputOptions.push('-c:a', 'copy');
+          if (srtEscaped) outputOptions.push("-vf subtitles='" + srtEscaped + "':force_style='" + subtitleStyle + "'");
         }
-
-        const subtitleStyle = req.body.subtitleStyle || "FontSize=8,Alignment=2,MarginV=20";
-        if (srtEscaped) outputOptions.push("-vf subtitles='" + srtEscaped + "':force_style='" + subtitleStyle + "'");
 
         cmd.outputOptions(outputOptions)
           .on('error', err => reject(err))
