@@ -283,4 +283,17 @@ async function concatMedia(paths, listFile, outPath) {
 app.listen(PORT, () => {
   console.log('[boot] Service on port ' + PORT);
   console.log('[boot] ffmpeg: ' + ffmpegInstaller.path);
+
+  // Font file detection for Railway environment
+  const fs = require('fs');
+  const fontPaths = [
+    '/app/assets/fonts/Inter-Regular.ttf',
+    '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf',
+    '/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf',
+    '/usr/share/fonts/dejavu/DejaVuSans.ttf',
+    '/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf',
+  ];
+  fontPaths.forEach(p => {
+    console.log('[font-check] ' + p + ': ' + (fs.existsSync(p) ? 'EXISTS' : 'NOT FOUND'));
+  });
 });
