@@ -17,14 +17,22 @@ const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SER
 
 app.get('/health', (_req, res) => res.json({ success: true, ffmpegPath: 'system' }));
 
-// Build a 3-second intro card video using FFmpeg drawtext (no external font dependency)
+/** Escape text for FFmpeg drawtext filter */
+function escapeDrawtext(text) {
+  return String(text || '')
+    .replace(/\\/g, '\\\\')
+    .replace(/'/g, "\\'")
+    .replace(/:/g, '\\:')
+    .replace(/,/g, '\\,')
+    .replace(/;/g, '\\;');
+}
+
+// Build a 3-second intro card video using FFmpeg drawtext
 async function buildIntroCard({ workDir, fontPath, projectTitle, episodeNum, episodeTitle }) {
   const introCardPath = path.join(workDir, 'introcard.mp4');
 
-  const escapeTxt = (s) => (s || '').replace(/'/g, "\u2019").replace(/:/g, '\\:').replace(/\\/g, '/');
-
-  const titleText = escapeTxt(projectTitle || 'ScriptFlow');
-  const episodeText = escapeTxt('Episode ' + (episodeNum || 1) + (episodeTitle ? ' \u00b7 ' + episodeTitle : ''));
+  const titleText = escapeDrawtext(projectTitle || 'ScriptFlow');
+  const episodeText = escapeDrawtext('Episode ' + (episodeNum || 1) + (episodeTitle ? ' \u00b7 ' + episodeTitle : ''));
 
   const FONT = '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf';
   const fontArg = ':fontfile=' + FONT;
@@ -35,8 +43,10 @@ async function buildIntroCard({ workDir, fontPath, projectTitle, episodeNum, epi
     "[t1]drawtext=text='" + episodeText + "'" + fontArg + ":fontcolor=#D4A017:fontsize=40:x=(w-tw)/2:y=(h-th)/2+20[out]"
   ].join(';');
 
+  console.log('[introCard] vf filter:', vf);
+
   await new Promise((resolve, reject) => {
-    ffmpeg()
+    const cmd = ffmpeg()
       .input('color=black:size=1080x1920:duration=3:rate=30')
       .inputOptions(['-f lavfi'])
       .input('anullsrc=r=48000:cl=stereo')
@@ -52,10 +62,9 @@ async function buildIntroCard({ workDir, fontPath, projectTitle, episodeNum, epi
         '-c:a', 'aac',
         '-b:a', '192k',
         '-shortest',
-      ])
-      .on('error', reject)
-      .on('end', resolve)
-      .save(introCardPath);
+      ]);
+    cmd.on('start', (cmdLine) => console.log('[introCard] FFmpeg command:', cmdLine));
+    cmd.on('error', reject).on('end', resolve).save(introCardPath);
   });
 
   return introCardPath;
@@ -65,11 +74,9 @@ async function buildIntroCard({ workDir, fontPath, projectTitle, episodeNum, epi
 async function buildEndCard({ workDir, fontPath, projectTitle, episodeNum, episodeTitle }) {
   const endCardPath = path.join(workDir, 'endcard.mp4');
 
-  const escapeTxt = (s) => (s || '').replace(/'/g, "\u2019").replace(/:/g, '\\:').replace(/\\/g, '/');
-
-  const titleText = escapeTxt(projectTitle || 'ScriptFlow');
-  const episodeText = escapeTxt('Episode ' + (episodeNum || 1) + (episodeTitle ? ' \u00b7 ' + episodeTitle : ''));
-  const handleText = '@wolfemperorai';
+  const titleText = escapeDrawtext(projectTitle || 'ScriptFlow');
+  const episodeText = escapeDrawtext('Episode ' + (episodeNum || 1) + (episodeTitle ? ' \u00b7 ' + episodeTitle : ''));
+  const handleText = escapeDrawtext('@wolfemperorai');
 
   const FONT = '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf';
   const fontArg = ':fontfile=' + FONT;
@@ -81,8 +88,10 @@ async function buildEndCard({ workDir, fontPath, projectTitle, episodeNum, episo
     "[t2]drawtext=text='" + handleText + "'" + fontArg + ":fontcolor=white:fontsize=40:x=(w-tw)/2:y=(h-th)/2+100[out]"
   ].join(';');
 
+  console.log('[endCard] vf filter:', vf);
+
   await new Promise((resolve, reject) => {
-    ffmpeg()
+    const cmd = ffmpeg()
       .input('color=black:size=1080x1920:duration=5:rate=30')
       .inputOptions(['-f lavfi'])
       .input('anullsrc=r=48000:cl=stereo')
@@ -98,10 +107,9 @@ async function buildEndCard({ workDir, fontPath, projectTitle, episodeNum, episo
         '-c:a', 'aac',
         '-b:a', '192k',
         '-shortest',
-      ])
-      .on('error', reject)
-      .on('end', resolve)
-      .save(endCardPath);
+      ]);
+    cmd.on('start', (cmdLine) => console.log('[endCard] FFmpeg command:', cmdLine));
+    cmd.on('error', reject).on('end', resolve).save(endCardPath);
   });
 
   return endCardPath;
