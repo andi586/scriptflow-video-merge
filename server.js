@@ -27,92 +27,86 @@ function escapeDrawtext(text) {
     .replace(/;/g, '\\;');
 }
 
-// Build a 3-second intro card video using FFmpeg drawtext
-async function buildIntroCard({ workDir, fontPath, projectTitle, episodeNum, episodeTitle }) {
-  const introCardPath = path.join(workDir, 'introcard.mp4');
+const DEJAVU_FONT = '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf';
 
-  const titleText = escapeDrawtext(projectTitle || 'ScriptFlow');
-  const episodeText = escapeDrawtext('Episode ' + (episodeNum || 1) + (episodeTitle ? ' \u00b7 ' + episodeTitle : ''));
+/**
+ * Build a title card (black background + drawtext + silent audio).
+ * Uses raw ffmpeg spawn to avoid fluent-ffmpeg filter escaping issues.
+ */
+async function buildTitleCard({ outPath, durationSec, lines }) {
+  // lines: [{text, fontcolor, fontsize, y}]
+  const { spawn } = require('child_process');
 
-  const FONT = '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf';
-  const fontArg = ':fontfile=' + FONT;
-
-  const vf = [
-    "color=black:size=1080x1920:duration=3:rate=30[bg]",
-    "[bg]drawtext=text='" + titleText + "'" + fontArg + ":fontcolor=white:fontsize=60:x=(w-tw)/2:y=(h-th)/2-60[t1]",
-    "[t1]drawtext=text='" + episodeText + "'" + fontArg + ":fontcolor=#D4A017:fontsize=40:x=(w-tw)/2:y=(h-th)/2+20[out]"
-  ].join(';');
-
-  console.log('[introCard] vf filter:', vf);
-
-  await new Promise((resolve, reject) => {
-    const cmd = ffmpeg()
-      .input('color=black:size=1080x1920:duration=3:rate=30')
-      .inputOptions(['-f lavfi'])
-      .input('anullsrc=r=48000:cl=stereo')
-      .inputOptions(['-f lavfi'])
-      .complexFilter(vf, 'out')
-      .outputOptions([
-        '-map', '[out]',
-        '-map', '1:a',
-        '-c:v', 'libx264',
-        '-preset', 'veryfast',
-        '-crf', '23',
-        '-pix_fmt', 'yuv420p',
-        '-c:a', 'aac',
-        '-b:a', '192k',
-        '-shortest',
-      ]);
-    cmd.on('start', (cmdLine) => console.log('[introCard] FFmpeg command:', cmdLine));
-    cmd.on('error', reject).on('end', resolve).save(introCardPath);
+  // Build vf filter chain: start with color source, chain drawtext filters
+  const drawtextFilters = lines.map(({ text, fontcolor, fontsize, y }) => {
+    const escaped = escapeDrawtext(text);
+    return `drawtext=fontfile='${DEJAVU_FONT}':text='${escaped}':fontcolor=${fontcolor}:fontsize=${fontsize}:x=(w-tw)/2:y=${y}`;
   });
 
-  return introCardPath;
+  // Full filter_complex: generate black video + overlay text + mix silent audio
+  const videoFilter = `color=black:size=1080x1920:duration=${durationSec}:rate=30[base];[base]${drawtextFilters.join(',')}[vout]`;
+
+  const args = [
+    '-f', 'lavfi', '-i', `color=black:size=1080x1920:duration=${durationSec}:rate=30`,
+    '-f', 'lavfi', '-i', `anullsrc=r=48000:cl=stereo`,
+    '-filter_complex', videoFilter,
+    '-map', '[vout]',
+    '-map', '1:a',
+    '-c:v', 'libx264',
+    '-preset', 'veryfast',
+    '-crf', '23',
+    '-pix_fmt', 'yuv420p',
+    '-c:a', 'aac',
+    '-b:a', '192k',
+    '-t', String(durationSec),
+    '-y',
+    outPath,
+  ];
+
+  console.log('[titleCard] ffmpeg args:', args.join(' '));
+
+  await new Promise((resolve, reject) => {
+    const proc = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    let stderr = '';
+    proc.stderr.on('data', (d) => { stderr += d.toString(); });
+    proc.on('close', (code) => {
+      if (code === 0) resolve();
+      else reject(new Error('titleCard ffmpeg exit ' + code + ': ' + stderr.slice(-500)));
+    });
+  });
+
+  return outPath;
 }
 
-// Build a 5-second end card video using FFmpeg drawtext
-async function buildEndCard({ workDir, fontPath, projectTitle, episodeNum, episodeTitle }) {
-  const endCardPath = path.join(workDir, 'endcard.mp4');
-
-  const titleText = escapeDrawtext(projectTitle || 'ScriptFlow');
-  const episodeText = escapeDrawtext('Episode ' + (episodeNum || 1) + (episodeTitle ? ' \u00b7 ' + episodeTitle : ''));
-  const handleText = escapeDrawtext('@wolfemperorai');
-
-  const FONT = '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf';
-  const fontArg = ':fontfile=' + FONT;
-
-  const vf = [
-    "color=black:size=1080x1920:duration=5:rate=30[bg]",
-    "[bg]drawtext=text='" + titleText + "'" + fontArg + ":fontcolor=white:fontsize=80:x=(w-tw)/2:y=(h-th)/2-140[t1]",
-    "[t1]drawtext=text='" + episodeText + "'" + fontArg + ":fontcolor=white:fontsize=60:x=(w-tw)/2:y=(h-th)/2[t2]",
-    "[t2]drawtext=text='" + handleText + "'" + fontArg + ":fontcolor=white:fontsize=40:x=(w-tw)/2:y=(h-th)/2+100[out]"
-  ].join(';');
-
-  console.log('[endCard] vf filter:', vf);
-
-  await new Promise((resolve, reject) => {
-    const cmd = ffmpeg()
-      .input('color=black:size=1080x1920:duration=5:rate=30')
-      .inputOptions(['-f lavfi'])
-      .input('anullsrc=r=48000:cl=stereo')
-      .inputOptions(['-f lavfi'])
-      .complexFilter(vf, 'out')
-      .outputOptions([
-        '-map', '[out]',
-        '-map', '1:a',
-        '-c:v', 'libx264',
-        '-preset', 'veryfast',
-        '-crf', '23',
-        '-pix_fmt', 'yuv420p',
-        '-c:a', 'aac',
-        '-b:a', '192k',
-        '-shortest',
-      ]);
-    cmd.on('start', (cmdLine) => console.log('[endCard] FFmpeg command:', cmdLine));
-    cmd.on('error', reject).on('end', resolve).save(endCardPath);
+// Build a 3-second intro card
+async function buildIntroCard({ workDir, projectTitle, episodeNum, episodeTitle }) {
+  const outPath = path.join(workDir, 'introcard.mp4');
+  const title = projectTitle || 'ScriptFlow';
+  const epLine = 'Episode ' + (episodeNum || 1) + (episodeTitle ? ' \u00b7 ' + episodeTitle : '');
+  return buildTitleCard({
+    outPath,
+    durationSec: 3,
+    lines: [
+      { text: title,  fontcolor: 'white',   fontsize: 60, y: '(h-th)/2-60' },
+      { text: epLine, fontcolor: '#D4A017', fontsize: 40, y: '(h-th)/2+20' },
+    ],
   });
+}
 
-  return endCardPath;
+// Build a 5-second end card
+async function buildEndCard({ workDir, projectTitle, episodeNum, episodeTitle }) {
+  const outPath = path.join(workDir, 'endcard.mp4');
+  const title = projectTitle || 'ScriptFlow';
+  const epLine = 'Episode ' + (episodeNum || 1) + (episodeTitle ? ' \u00b7 ' + episodeTitle : '');
+  return buildTitleCard({
+    outPath,
+    durationSec: 5,
+    lines: [
+      { text: title,           fontcolor: 'white', fontsize: 80, y: '(h-th)/2-140' },
+      { text: epLine,          fontcolor: 'white', fontsize: 60, y: '(h-th)/2'     },
+      { text: '@wolfemperorai', fontcolor: 'white', fontsize: 40, y: '(h-th)/2+100' },
+    ],
+  });
 }
 
 app.post('/merge', async (req, res) => {
