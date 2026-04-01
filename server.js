@@ -113,7 +113,7 @@ app.post('/merge', async (req, res) => {
   const requestId = crypto.randomUUID();
   let workDir = null;
   try {
-    const { projectId, videoUrls, audioUrls, srtContent, projectTitle, episodeNum, episodeTitle, bgmUrl } = req.body || {};
+    const { projectId, videoUrls, audioUrls, srtContent, projectTitle, episodeNum, episodeTitle, bgmUrl, ambienceUrl } = req.body || {};
     if (!projectId || !videoUrls?.length) {
       return res.status(400).json({ success: false, error: 'Missing required fields: projectId and videoUrls are required' });
     }
@@ -167,6 +167,21 @@ app.post('/merge', async (req, res) => {
         }
       }
 
+      // Download ambience if provided
+      const hasAmbience = typeof ambienceUrl === 'string' && ambienceUrl.trim().length > 0;
+      let ambiencePath = null;
+      if (hasAmbience) {
+        try {
+          ambiencePath = path.join(workDir, 'ambience.mp3');
+          await download(ambienceUrl, ambiencePath);
+          const ambStat = await fsp.stat(ambiencePath);
+          console.log('[' + requestId + '] Ambience downloaded:', ambiencePath, 'size:', ambStat.size, 'bytes');
+        } catch (ambErr) {
+          console.warn('[' + requestId + '] Ambience download failed (skipping): ' + ambErr.message);
+          ambiencePath = null;
+        }
+      }
+
       let srtPath = null;
       if (hasSrt) {
         srtPath = path.join(workDir, 'sub.srt');
@@ -181,26 +196,54 @@ app.post('/merge', async (req, res) => {
         const cmd = ffmpeg().input(concatVideo);
         if (concatAudio) cmd.input(concatAudio);
         if (bgmPath) cmd.input(bgmPath);
+        if (ambiencePath) cmd.input(ambiencePath);
 
         const outputOptions = ['-c:v libx264', '-preset veryfast', '-crf 23'];
 
-        console.log('[merge] concatAudio:', !!concatAudio, 'bgmPath:', bgmPath);
+        console.log('[merge] concatAudio:', !!concatAudio, 'bgmPath:', !!bgmPath, 'ambiencePath:', !!ambiencePath);
 
         const subtitleStyle = req.body.subtitleStyle || "FontSize=8,Alignment=2,MarginV=20";
 
-        if (concatAudio && bgmPath) {
-          // Three-track mix: video (input 0) + dialogue audio (input 1) + BGM (input 2, looped)
-          // BGM at 15% volume, looped to match video duration
-          const filterComplex = '[1:a]volume=1.0[dialogue];[2:a]volume=0.28,aloop=loop=-1:size=2147483647[bgm];[dialogue][bgm]amix=inputs=2:duration=first[aout]';
+        // Determine input indices dynamically
+        let inputIdx = 1; // 0 = video
+        const dialogueIdx = concatAudio ? inputIdx++ : null;
+        const bgmIdx = bgmPath ? inputIdx++ : null;
+        const ambIdx = ambiencePath ? inputIdx++ : null;
+
+        if (dialogueIdx !== null && bgmIdx !== null && ambIdx !== null) {
+          // Four-track mix: dialogue + BGM + ambience
+          const filterComplex =
+            `[${dialogueIdx}:a]volume=1.0[dialogue];` +
+            `[${bgmIdx}:a]volume=0.28,aloop=loop=-1:size=2147483647[bgm];` +
+            `[${ambIdx}:a]volume=0.10,aloop=loop=-1:size=2147483647[amb];` +
+            `[dialogue][bgm][amb]amix=inputs=3:duration=first[aout]`;
           outputOptions.push('-filter_complex', filterComplex);
           outputOptions.push('-map', '0:v', '-map', '[aout]', '-c:a', 'aac', '-b:a', '192k', '-shortest');
           if (srtEscaped) outputOptions.push("-vf subtitles='" + srtEscaped + "':force_style='" + subtitleStyle + "'");
-        } else if (concatAudio) {
-          outputOptions.push('-map', '0:v:0', '-map', '1:a:0', '-c:a', 'aac', '-b:a', '192k', '-shortest');
+        } else if (dialogueIdx !== null && bgmIdx !== null) {
+          // Three-track mix: dialogue + BGM
+          const filterComplex =
+            `[${dialogueIdx}:a]volume=1.0[dialogue];` +
+            `[${bgmIdx}:a]volume=0.28,aloop=loop=-1:size=2147483647[bgm];` +
+            `[dialogue][bgm]amix=inputs=2:duration=first[aout]`;
+          outputOptions.push('-filter_complex', filterComplex);
+          outputOptions.push('-map', '0:v', '-map', '[aout]', '-c:a', 'aac', '-b:a', '192k', '-shortest');
           if (srtEscaped) outputOptions.push("-vf subtitles='" + srtEscaped + "':force_style='" + subtitleStyle + "'");
-        } else if (bgmPath) {
+        } else if (dialogueIdx !== null && ambIdx !== null) {
+          // Dialogue + ambience (no BGM)
+          const filterComplex =
+            `[${dialogueIdx}:a]volume=1.0[dialogue];` +
+            `[${ambIdx}:a]volume=0.10,aloop=loop=-1:size=2147483647[amb];` +
+            `[dialogue][amb]amix=inputs=2:duration=first[aout]`;
+          outputOptions.push('-filter_complex', filterComplex);
+          outputOptions.push('-map', '0:v', '-map', '[aout]', '-c:a', 'aac', '-b:a', '192k', '-shortest');
+          if (srtEscaped) outputOptions.push("-vf subtitles='" + srtEscaped + "':force_style='" + subtitleStyle + "'");
+        } else if (dialogueIdx !== null) {
+          outputOptions.push('-map', '0:v:0', '-map', dialogueIdx + ':a:0', '-c:a', 'aac', '-b:a', '192k', '-shortest');
+          if (srtEscaped) outputOptions.push("-vf subtitles='" + srtEscaped + "':force_style='" + subtitleStyle + "'");
+        } else if (bgmIdx !== null) {
           // BGM only (no dialogue audio)
-          outputOptions.push('-filter_complex', '[1:a]volume=0.4,aloop=loop=-1:size=2147483647[aout]');
+          outputOptions.push('-filter_complex', '[' + bgmIdx + ':a]volume=0.4,aloop=loop=-1:size=2147483647[aout]');
           outputOptions.push('-map', '0:v:0', '-map', '[aout]', '-c:a', 'aac', '-b:a', '192k', '-shortest');
         } else {
           outputOptions.push('-c:a', 'copy');
