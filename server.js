@@ -26,10 +26,13 @@ async function buildIntroCard({ workDir, fontPath, projectTitle, episodeNum, epi
   const titleText = escapeTxt(projectTitle || 'ScriptFlow');
   const episodeText = escapeTxt('Episode ' + (episodeNum || 1) + (episodeTitle ? ' \u00b7 ' + episodeTitle : ''));
 
+  const FONT = '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf';
+  const fontArg = ':fontfile=' + FONT;
+
   const vf = [
     "color=black:size=1080x1920:duration=3:rate=30[bg]",
-    "[bg]drawtext=text='" + titleText + "':fontcolor=white:fontsize=60:x=(w-tw)/2:y=(h-th)/2-60[t1]",
-    "[t1]drawtext=text='" + episodeText + "':fontcolor=#D4A017:fontsize=40:x=(w-tw)/2:y=(h-th)/2+20[out]"
+    "[bg]drawtext=text='" + titleText + "'" + fontArg + ":fontcolor=white:fontsize=60:x=(w-tw)/2:y=(h-th)/2-60[t1]",
+    "[t1]drawtext=text='" + episodeText + "'" + fontArg + ":fontcolor=#D4A017:fontsize=40:x=(w-tw)/2:y=(h-th)/2+20[out]"
   ].join(';');
 
   await new Promise((resolve, reject) => {
@@ -68,11 +71,14 @@ async function buildEndCard({ workDir, fontPath, projectTitle, episodeNum, episo
   const episodeText = escapeTxt('Episode ' + (episodeNum || 1) + (episodeTitle ? ' \u00b7 ' + episodeTitle : ''));
   const handleText = '@wolfemperorai';
 
+  const FONT = '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf';
+  const fontArg = ':fontfile=' + FONT;
+
   const vf = [
     "color=black:size=1080x1920:duration=5:rate=30[bg]",
-    "[bg]drawtext=text='" + titleText + "':fontcolor=white:fontsize=80:x=(w-tw)/2:y=(h-th)/2-140[t1]",
-    "[t1]drawtext=text='" + episodeText + "':fontcolor=white:fontsize=60:x=(w-tw)/2:y=(h-th)/2[t2]",
-    "[t2]drawtext=text='" + handleText + "':fontcolor=white:fontsize=40:x=(w-tw)/2:y=(h-th)/2+100[out]"
+    "[bg]drawtext=text='" + titleText + "'" + fontArg + ":fontcolor=white:fontsize=80:x=(w-tw)/2:y=(h-th)/2-140[t1]",
+    "[t1]drawtext=text='" + episodeText + "'" + fontArg + ":fontcolor=white:fontsize=60:x=(w-tw)/2:y=(h-th)/2[t2]",
+    "[t2]drawtext=text='" + handleText + "'" + fontArg + ":fontcolor=white:fontsize=40:x=(w-tw)/2:y=(h-th)/2+100[out]"
   ].join(';');
 
   await new Promise((resolve, reject) => {
