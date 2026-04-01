@@ -210,6 +210,9 @@ app.post('/merge', async (req, res) => {
         const bgmIdx = bgmPath ? inputIdx++ : null;
         const ambIdx = ambiencePath ? inputIdx++ : null;
 
+        // Standard iOS/QuickTime-compatible AAC audio options
+        const aacOpts = ['-c:a', 'aac', '-ar', '48000', '-ac', '2', '-b:a', '192k', '-profile:a', 'aac_low'];
+
         if (dialogueIdx !== null && bgmIdx !== null && ambIdx !== null) {
           // Four-track mix: dialogue + BGM + ambience
           const filterComplex =
@@ -218,7 +221,7 @@ app.post('/merge', async (req, res) => {
             `[${ambIdx}:a]volume=0.10,aloop=loop=-1:size=2147483647[amb];` +
             `[dialogue][bgm][amb]amix=inputs=3:duration=first[aout]`;
           outputOptions.push('-filter_complex', filterComplex);
-          outputOptions.push('-map', '0:v', '-map', '[aout]', '-c:a', 'aac', '-b:a', '192k', '-shortest');
+          outputOptions.push('-map', '0:v', '-map', '[aout]', ...aacOpts, '-shortest');
           if (srtEscaped) outputOptions.push("-vf subtitles='" + srtEscaped + "':force_style='" + subtitleStyle + "'");
         } else if (dialogueIdx !== null && bgmIdx !== null) {
           // Three-track mix: dialogue + BGM
@@ -227,7 +230,7 @@ app.post('/merge', async (req, res) => {
             `[${bgmIdx}:a]volume=0.28,aloop=loop=-1:size=2147483647[bgm];` +
             `[dialogue][bgm]amix=inputs=2:duration=first[aout]`;
           outputOptions.push('-filter_complex', filterComplex);
-          outputOptions.push('-map', '0:v', '-map', '[aout]', '-c:a', 'aac', '-b:a', '192k', '-shortest');
+          outputOptions.push('-map', '0:v', '-map', '[aout]', ...aacOpts, '-shortest');
           if (srtEscaped) outputOptions.push("-vf subtitles='" + srtEscaped + "':force_style='" + subtitleStyle + "'");
         } else if (dialogueIdx !== null && ambIdx !== null) {
           // Dialogue + ambience (no BGM)
@@ -236,15 +239,15 @@ app.post('/merge', async (req, res) => {
             `[${ambIdx}:a]volume=0.10,aloop=loop=-1:size=2147483647[amb];` +
             `[dialogue][amb]amix=inputs=2:duration=first[aout]`;
           outputOptions.push('-filter_complex', filterComplex);
-          outputOptions.push('-map', '0:v', '-map', '[aout]', '-c:a', 'aac', '-b:a', '192k', '-shortest');
+          outputOptions.push('-map', '0:v', '-map', '[aout]', ...aacOpts, '-shortest');
           if (srtEscaped) outputOptions.push("-vf subtitles='" + srtEscaped + "':force_style='" + subtitleStyle + "'");
         } else if (dialogueIdx !== null) {
-          outputOptions.push('-map', '0:v:0', '-map', dialogueIdx + ':a:0', '-c:a', 'aac', '-b:a', '192k', '-shortest');
+          outputOptions.push('-map', '0:v:0', '-map', dialogueIdx + ':a:0', ...aacOpts, '-shortest');
           if (srtEscaped) outputOptions.push("-vf subtitles='" + srtEscaped + "':force_style='" + subtitleStyle + "'");
         } else if (bgmIdx !== null) {
           // BGM only (no dialogue audio)
           outputOptions.push('-filter_complex', '[' + bgmIdx + ':a]volume=0.4,aloop=loop=-1:size=2147483647[aout]');
-          outputOptions.push('-map', '0:v:0', '-map', '[aout]', '-c:a', 'aac', '-b:a', '192k', '-shortest');
+          outputOptions.push('-map', '0:v:0', '-map', '[aout]', ...aacOpts, '-shortest');
         } else {
           outputOptions.push('-c:a', 'copy');
           if (srtEscaped) outputOptions.push("-vf subtitles='" + srtEscaped + "':force_style='" + subtitleStyle + "'");
