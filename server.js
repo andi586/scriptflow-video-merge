@@ -4,10 +4,10 @@ const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 const ffmpeg = require('fluent-ffmpeg');
-const ffmpegInstaller = require('@ffmpeg-installer/ffmpeg');
 const { createClient } = require('@supabase/supabase-js');
 
-ffmpeg.setFfmpegPath(ffmpegInstaller.path);
+// Use system ffmpeg (installed via nixpacks.toml)
+// fluent-ffmpeg will auto-detect from PATH
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
@@ -15,7 +15,7 @@ app.use(express.json({ limit: '10mb' }));
 const PORT = Number(process.env.PORT || 3000);
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } });
 
-app.get('/health', (_req, res) => res.json({ success: true, ffmpegPath: ffmpegInstaller.path }));
+app.get('/health', (_req, res) => res.json({ success: true, ffmpegPath: 'system' }));
 
 // Build a 3-second intro card video using FFmpeg drawtext (no external font dependency)
 async function buildIntroCard({ workDir, fontPath, projectTitle, episodeNum, episodeTitle }) {
@@ -282,7 +282,7 @@ async function concatMedia(paths, listFile, outPath) {
 
 app.listen(PORT, () => {
   console.log('[boot] Service on port ' + PORT);
-  console.log('[boot] ffmpeg: ' + ffmpegInstaller.path);
+  console.log('[boot] ffmpeg: system (via nixpacks)');
 
   // Font file detection for Railway environment
   const fs = require('fs');
