@@ -36,11 +36,12 @@ function getFontForLanguage(lang) {
   const cjk = ['zh', 'ja', 'ko'];
   const arabic = ['ar', 'fa', 'ur'];
   if (cjk.includes(lang)) {
-    // Noto CJK installed via fonts-noto-cjk
+    // Noto CJK installed via fonts-noto-cjk (Debian bookworm confirmed path)
     const candidates = [
       '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc',
-      '/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc',
+      '/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc',
       '/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc',
+      '/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc',
     ];
     const fs = require('fs');
     for (const p of candidates) {
