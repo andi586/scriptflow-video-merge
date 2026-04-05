@@ -29,6 +29,47 @@ function escapeDrawtext(text) {
 
 const DEJAVU_FONT = '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf';
 
+// ─── Multilingual font mapping ────────────────────────────────────────────────
+// Returns the best available font path for the given ISO 639-1 language code.
+// CJK languages need Noto CJK; others fall back to Noto Sans or DejaVu.
+function getFontForLanguage(lang) {
+  const cjk = ['zh', 'ja', 'ko'];
+  const arabic = ['ar', 'fa', 'ur'];
+  if (cjk.includes(lang)) {
+    // Noto CJK installed via fonts-noto-cjk
+    const candidates = [
+      '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc',
+      '/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc',
+      '/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc',
+    ];
+    const fs = require('fs');
+    for (const p of candidates) {
+      if (fs.existsSync(p)) return p;
+    }
+  }
+  if (arabic.includes(lang)) {
+    const candidates = [
+      '/usr/share/fonts/truetype/noto/NotoSansArabic-Regular.ttf',
+      '/usr/share/fonts/opentype/noto/NotoSansArabic-Regular.ttf',
+    ];
+    const fs = require('fs');
+    for (const p of candidates) {
+      if (fs.existsSync(p)) return p;
+    }
+  }
+  // Default: Noto Sans or DejaVu
+  const defaults = [
+    '/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf',
+    '/usr/share/fonts/opentype/noto/NotoSans-Regular.ttf',
+    DEJAVU_FONT,
+  ];
+  const fs = require('fs');
+  for (const p of defaults) {
+    if (fs.existsSync(p)) return p;
+  }
+  return DEJAVU_FONT;
+}
+
 /**
  * Build a title card (black background + drawtext + silent audio).
  * Uses raw ffmpeg spawn to avoid fluent-ffmpeg filter escaping issues.
@@ -79,10 +120,11 @@ async function buildTitleCard({ outPath, durationSec, lines }) {
 }
 
 // Build a 3-second intro card
-async function buildIntroCard({ workDir, projectTitle, episodeNum, episodeTitle }) {
+// Only called when episodeNum is not null/undefined (Director Mode with series)
+async function buildIntroCard({ workDir, projectTitle, episodeNum, episodeTitle, seriesName }) {
   const outPath = path.join(workDir, 'introcard.mp4');
-  const title = projectTitle || 'ScriptFlow';
-  const epLine = 'Episode ' + (episodeNum || 1) + (episodeTitle ? ' \u00b7 ' + episodeTitle : '');
+  const title = seriesName || projectTitle || 'ScriptFlow';
+  const epLine = 'Episode ' + episodeNum + (episodeTitle ? ' \u00b7 ' + episodeTitle : '');
   return buildTitleCard({
     outPath,
     durationSec: 3,
@@ -94,17 +136,17 @@ async function buildIntroCard({ workDir, projectTitle, episodeNum, episodeTitle 
 }
 
 // Build a 5-second end card
-async function buildEndCard({ workDir, projectTitle, episodeNum, episodeTitle }) {
+// Only called when episodeNum is not null/undefined (Director Mode with series)
+async function buildEndCard({ workDir, projectTitle, episodeNum, episodeTitle, seriesName }) {
   const outPath = path.join(workDir, 'endcard.mp4');
-  const title = projectTitle || 'ScriptFlow';
-  const epLine = 'Episode ' + (episodeNum || 1) + (episodeTitle ? ' \u00b7 ' + episodeTitle : '');
+  const title = seriesName || projectTitle || 'ScriptFlow';
+  const epLine = 'Episode ' + episodeNum + (episodeTitle ? ' \u00b7 ' + episodeTitle : '');
   return buildTitleCard({
     outPath,
     durationSec: 5,
     lines: [
-      { text: title,           fontcolor: 'white', fontsize: 80, y: '(h-th)/2-140' },
-      { text: epLine,          fontcolor: 'white', fontsize: 60, y: '(h-th)/2'     },
-      { text: '@wolfemperorai', fontcolor: 'white', fontsize: 40, y: '(h-th)/2+100' },
+      { text: title,  fontcolor: 'white', fontsize: 80, y: '(h-th)/2-140' },
+      { text: epLine, fontcolor: 'white', fontsize: 60, y: '(h-th)/2'     },
     ],
   });
 }
@@ -113,7 +155,7 @@ app.post('/merge', async (req, res) => {
   const requestId = crypto.randomUUID();
   let workDir = null;
   try {
-    const { projectId, videoUrls, audioUrls, srtContent, projectTitle, episodeNum, episodeTitle, bgmUrl, ambienceUrl } = req.body || {};
+    const { projectId, videoUrls, audioUrls, srtContent, projectTitle, episodeNum, episodeTitle, bgmUrl, ambienceUrl, isStarMode } = req.body || {};
     if (!projectId || !videoUrls?.length) {
       return res.status(400).json({ success: false, error: 'Missing required fields: projectId and videoUrls are required' });
     }
@@ -192,6 +234,11 @@ app.post('/merge', async (req, res) => {
         ? path.resolve(srtPath).replace(/\\/g,'/').replace(/:/g,'\\:').replace(/'/g,"\\'")
         : null;
 
+      // ── Multilingual subtitle font ──────────────────────────────────────
+      const userLanguage = (req.body.userLanguage || 'en').toLowerCase().split('-')[0];
+      const subtitleFontPath = getFontForLanguage(userLanguage);
+      console.log('[merge] userLanguage=' + userLanguage + ' subtitleFont=' + subtitleFontPath);
+
       await new Promise((resolve, reject) => {
         const cmd = ffmpeg().input(concatVideo);
         if (concatAudio) cmd.input(concatAudio);
@@ -202,7 +249,11 @@ app.post('/merge', async (req, res) => {
 
         console.log('[merge] concatAudio:', !!concatAudio, 'bgmPath:', !!bgmPath, 'ambiencePath:', !!ambiencePath);
 
+        // Use language-appropriate font for subtitles
         const subtitleStyle = req.body.subtitleStyle || "FontSize=8,Alignment=2,MarginV=20";
+        const srtWithFont = srtEscaped
+          ? "subtitles='" + srtEscaped + "':fontsdir='/usr/share/fonts':force_style='" + subtitleStyle + "'"
+          : null;
 
         // Determine input indices dynamically
         let inputIdx = 1; // 0 = video
@@ -272,22 +323,33 @@ app.post('/merge', async (req, res) => {
     }
 
     // Build intro card and end card
-    const fontPath = path.join(__dirname, 'assets', 'fonts', 'Inter-Regular.ttf');
+    // Rules:
+    //   - isStarMode=true → skip all title cards (clean video)
+    //   - episodeNum is null/undefined → skip title cards (no series set)
+    //   - episodeNum is a number → show title cards with seriesName + episode number
+    const { seriesName } = req.body || {};
+    const hasEpisodeNum = episodeNum !== null && episodeNum !== undefined;
 
     let introCardPath = null;
-    try {
-      introCardPath = await buildIntroCard({ workDir, fontPath, projectTitle, episodeNum, episodeTitle });
-      console.log('[' + requestId + '] Intro card built: ' + introCardPath);
-    } catch (icErr) {
-      console.warn('[' + requestId + '] Intro card build failed (skipping): ' + icErr.message);
-    }
-
     let endCardPath = null;
-    try {
-      endCardPath = await buildEndCard({ workDir, fontPath, projectTitle, episodeNum, episodeTitle });
-      console.log('[' + requestId + '] End card built: ' + endCardPath);
-    } catch (ecErr) {
-      console.warn('[' + requestId + '] End card build failed (skipping): ' + ecErr.message);
+
+    if (!isStarMode && hasEpisodeNum) {
+      try {
+        introCardPath = await buildIntroCard({ workDir, projectTitle, episodeNum, episodeTitle, seriesName });
+        console.log('[' + requestId + '] Intro card built: ' + introCardPath);
+      } catch (icErr) {
+        console.warn('[' + requestId + '] Intro card build failed (skipping): ' + icErr.message);
+      }
+
+      try {
+        endCardPath = await buildEndCard({ workDir, projectTitle, episodeNum, episodeTitle, seriesName });
+        console.log('[' + requestId + '] End card built: ' + endCardPath);
+      } catch (ecErr) {
+        console.warn('[' + requestId + '] End card build failed (skipping): ' + ecErr.message);
+      }
+    } else {
+      const reason = isStarMode ? 'Star Mode' : 'no episode number set';
+      console.log('[' + requestId + '] Skipping title cards: ' + reason);
     }
 
     // Assemble: [intro card] + merged + [end card]
@@ -303,14 +365,147 @@ app.post('/merge', async (req, res) => {
       await fsp.rename(mergedPath, finalPath);
     }
 
-    const buf = await fsp.readFile(finalPath);
+    // HumanTouch post-processing: apply cinematic video/audio filters
+    const humanTouchPath = path.join(workDir, 'humantouch.mp4');
+    console.log('[' + requestId + '] Applying HumanTouch post-processing...');
+    await new Promise((resolve, reject) => {
+      const { spawn } = require('child_process');
+      const args = [
+        '-i', finalPath,
+        '-vf', 'eq=contrast=1.05:saturation=0.92',
+        '-af', 'loudnorm=I=-16:LRA=11:TP=-1.5',
+        '-c:v', 'libx264',
+        '-crf', '23',
+        '-preset', 'medium',
+        '-c:a', 'aac',
+        '-b:a', '192k',
+        '-y',
+        humanTouchPath,
+      ];
+      console.log('[humantouch] ffmpeg args:', args.join(' '));
+      const proc = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+      let stderr = '';
+      proc.stderr.on('data', (d) => { stderr += d.toString(); });
+      proc.on('close', (code) => {
+        if (code === 0) {
+          console.log('[' + requestId + '] HumanTouch post-processing done.');
+          resolve();
+        } else {
+          reject(new Error('HumanTouch ffmpeg exit ' + code + ': ' + stderr.slice(-500)));
+        }
+      });
+    });
+
+    // ── Watermark ─────────────────────────────────────────────────────────
+    // Determine user tier from Supabase, then burn watermark into video.
+    // Director Pass → subtle watermark; Basic (default) → standard watermark.
+    const watermarkedPath = path.join(workDir, 'watermarked.mp4');
+    console.log('[watermark] function called, requestId:', requestId);
+    try {
+      // Step 1: get user_id from projects table
+      let userId = null;
+      try {
+        const { data: projRow } = await supabase
+          .from('projects')
+          .select('user_id')
+          .eq('id', projectId)
+          .single();
+        userId = projRow?.user_id ?? null;
+      } catch (e) {
+        console.warn('[watermark] Could not fetch user_id: ' + e.message);
+      }
+
+      // Step 2: check subscription tier
+      let isDirectorPass = false;
+      if (userId) {
+        try {
+          // Try subscriptions table first
+          const { data: subRow } = await supabase
+            .from('subscriptions')
+            .select('plan, status')
+            .eq('user_id', userId)
+            .in('status', ['active', 'trialing'])
+            .order('created_at', { ascending: false })
+            .limit(1)
+            .single();
+          if (subRow) {
+            const plan = (subRow.plan || '').toLowerCase();
+            isDirectorPass = plan.includes('director') || plan.includes('pro') || plan.includes('premium');
+          }
+        } catch (e) {
+          console.warn('[watermark] Subscription lookup failed (defaulting to Basic): ' + e.message);
+        }
+      }
+
+      // Step 3: burn watermark
+      const watermarkText = isDirectorPass ? 'heavencinema.ai' : 'getscriptflow.com';
+      const fontsize = isDirectorPass ? 24 : 28;
+      const fontcolor = isDirectorPass ? 'white@0.6' : 'white@0.8';
+      const drawtext = "drawtext=fontfile='" + DEJAVU_FONT + "':text='" + watermarkText + "':fontsize=22:fontcolor=white@0.6:borderw=2:bordercolor=black@0.5:x=w-tw-20:y=20";
+
+      console.log('[watermark][' + requestId + '] tier=' + (isDirectorPass ? 'director_pass' : 'basic') + ' text="' + watermarkText + '"');
+
+      await new Promise((resolve, reject) => {
+        const { spawn } = require('child_process');
+        const args = [
+          '-i', humanTouchPath,
+          '-vf', drawtext,
+          '-c:v', 'libx264',
+          '-crf', '23',
+          '-preset', 'medium',
+          '-c:a', 'copy',
+          '-y',
+          watermarkedPath,
+        ];
+        console.log('[watermark] ffmpeg args:', args.join(' '));
+        const proc = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+        let stderr = '';
+        proc.stderr.on('data', (d) => { stderr += d.toString(); });
+        proc.on('close', (code) => {
+          if (code === 0) {
+            console.log('[watermark][' + requestId + '] Watermark applied.');
+            resolve();
+          } else {
+            reject(new Error('Watermark ffmpeg exit ' + code + ': ' + stderr.slice(-500)));
+          }
+        });
+      });
+    } catch (wmErr) {
+      // Watermark failure is non-fatal: fall back to un-watermarked video
+      console.warn('[watermark][' + requestId + '] Watermark failed (using humantouch output): ' + wmErr.message);
+      await fsp.copyFile(humanTouchPath, watermarkedPath).catch(() => {});
+    }
+    // ── End Watermark ──────────────────────────────────────────────────────
+
+    // ── F84 Quality Check ──────────────────────────────────────────────────
+    console.log('[' + requestId + '] Starting F84 QC...');
+    const qcReport = await runF84QC(watermarkedPath, requestId);
+
+    // Write QC result to Supabase projects table (best-effort, non-blocking)
+    try {
+      const { error: qcErr } = await supabase
+        .from('projects')
+        .update({
+          qc_status: qcReport.status,
+          qc_score: qcReport.score,
+          qc_report: qcReport,
+        })
+        .eq('id', projectId);
+      if (qcErr) console.warn('[' + requestId + '] QC DB write failed: ' + qcErr.message);
+      else console.log('[' + requestId + '] QC result saved: status=' + qcReport.status + ' score=' + qcReport.score);
+    } catch (qcDbErr) {
+      console.warn('[' + requestId + '] QC DB write error: ' + qcDbErr.message);
+    }
+    // ── End F84 QC ─────────────────────────────────────────────────────────
+
+    const buf = await fsp.readFile(watermarkedPath);
     const storagePath = projectId + '/final-' + Date.now() + '.mp4';
     const { error } = await supabase.storage.from('generated-videos').upload(storagePath, buf, { contentType: 'video/mp4', upsert: true });
     if (error) throw new Error('Upload failed: ' + error.message);
 
     const { data } = supabase.storage.from('generated-videos').getPublicUrl(storagePath);
     console.log('[' + requestId + '] Done: ' + data.publicUrl);
-    res.json({ success: true, finalVideoUrl: data.publicUrl });
+    res.json({ success: true, finalVideoUrl: data.publicUrl, qc: { status: qcReport.status, score: qcReport.score } });
   } catch (err) {
     console.error('[' + requestId + '] ERROR:', err.message);
     res.status(500).json({ success: false, error: err.message });
@@ -318,6 +513,103 @@ app.post('/merge', async (req, res) => {
     if (workDir) await fsp.rm(workDir, { recursive: true, force: true }).catch(() => {});
   }
 });
+
+/**
+ * F84 Quality Check — "三无产品不放行"
+ *
+ * Hard Fail (blocks upload) — only 3 conditions:
+ *   1. 无影: no video stream, OR duration < 5s
+ *   2. 无声: no audio stream
+ *   3. 无色: (covered by no video stream check above)
+ *
+ * If all 3 checks pass → status='passed', score=100
+ * If any check fails  → status='failed', score=0
+ */
+async function runF84QC(videoPath, requestId) {
+  const { spawn } = require('child_process');
+  const log = (msg) => console.log('[f84qc][' + requestId + '] ' + msg);
+
+  function spawnCollect(cmd, args) {
+    return new Promise((resolve) => {
+      const proc = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+      let stdout = '';
+      let stderr = '';
+      proc.stdout.on('data', (d) => { stdout += d.toString(); });
+      proc.stderr.on('data', (d) => { stderr += d.toString(); });
+      proc.on('close', (code) => resolve({ code, stdout, stderr }));
+    });
+  }
+
+  const report = {
+    checkedAt: new Date().toISOString(),
+    hardFails: [],
+    checks: {},
+    score: 0,
+    status: 'pending',
+  };
+
+  // ── ffprobe: get duration + stream types in one call ─────────────────────
+  let durationSec = 0;
+  let hasVideoStream = false;
+  let hasAudioStream = false;
+
+  try {
+    const { code, stdout, stderr } = await spawnCollect('ffprobe', [
+      '-v', 'error',
+      '-show_entries', 'format=duration:stream=codec_type',
+      '-of', 'default=noprint_wrappers=1',
+      videoPath,
+    ]);
+
+    if (code !== 0) {
+      report.hardFails.push('file_unreadable: ffprobe exit ' + code);
+      log('HARD FAIL: file unreadable (ffprobe exit ' + code + ')');
+    } else {
+      const durMatch = stdout.match(/duration=([\d.]+)/);
+      durationSec = durMatch ? (parseFloat(durMatch[1]) || 0) : 0;
+      hasVideoStream = stdout.includes('codec_type=video');
+      hasAudioStream = stdout.includes('codec_type=audio');
+      log('duration=' + durationSec.toFixed(2) + 's hasVideo=' + hasVideoStream + ' hasAudio=' + hasAudioStream);
+    }
+  } catch (e) {
+    report.hardFails.push('file_unreadable: ' + e.message);
+    log('HARD FAIL: ffprobe threw: ' + e.message);
+  }
+
+  // ── Check 1: 无影 — no video stream or duration < 5s ────────────────────
+  if (!hasVideoStream) {
+    report.hardFails.push('no_video_stream');
+    log('HARD FAIL: no video stream');
+  } else if (durationSec < 5) {
+    report.hardFails.push('duration_too_short: ' + durationSec.toFixed(2) + 's < 5s');
+    log('HARD FAIL: duration too short (' + durationSec.toFixed(2) + 's)');
+  }
+
+  // ── Check 2: 无声 — no audio stream ─────────────────────────────────────
+  if (!hasAudioStream) {
+    report.hardFails.push('no_audio_stream');
+    log('HARD FAIL: no audio stream');
+  }
+
+  // ── Result ───────────────────────────────────────────────────────────────
+  report.checks = {
+    has_video_stream: hasVideoStream,
+    has_audio_stream: hasAudioStream,
+    duration_sec: durationSec,
+  };
+
+  if (report.hardFails.length === 0) {
+    report.status = 'passed';
+    report.score = 100;
+    log('QC PASSED score=100');
+  } else {
+    report.status = 'failed';
+    report.score = 0;
+    log('QC FAILED hardFails=' + JSON.stringify(report.hardFails));
+  }
+
+  return report;
+}
 
 async function download(url, outPath) {
   const res = await fetch(url);
@@ -346,6 +638,10 @@ app.listen(PORT, () => {
     '/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf',
     '/usr/share/fonts/dejavu/DejaVuSans.ttf',
     '/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf',
+    // Noto CJK font paths (fonts-noto-cjk package)
+    '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc',
+    '/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc',
+    '/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc',
   ];
   fontPaths.forEach(p => {
     console.log('[font-check] ' + p + ': ' + (fs.existsSync(p) ? 'EXISTS' : 'NOT FOUND'));
