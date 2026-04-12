@@ -152,6 +152,62 @@ async function buildEndCard({ workDir, projectTitle, episodeNum, episodeTitle, s
   });
 }
 
+app.post('/convert-audio', async (req, res) => {
+  const { audioUrl } = req.body || {};
+  if (!audioUrl) return res.status(400).json({ success: false, error: 'audioUrl is required' });
+
+  let tmpWebm = null;
+  let tmpMp3 = null;
+  try {
+    const { join } = require('path');
+    const os = require('os');
+    const ts = Date.now();
+    tmpWebm = join(os.tmpdir(), `convert_${ts}.webm`);
+    tmpMp3 = join(os.tmpdir(), `convert_${ts}.mp3`);
+
+    // Download webm
+    const audioRes = await fetch(audioUrl);
+    if (!audioRes.ok) throw new Error('Download failed: ' + audioUrl);
+    const audioBuf = Buffer.from(await audioRes.arrayBuffer());
+    await fsp.writeFile(tmpWebm, audioBuf);
+    console.log('[convert-audio] downloaded webm, bytes:', audioBuf.length);
+
+    // Convert to mp3 using ffmpeg
+    await new Promise((resolve, reject) => {
+      const { spawn } = require('child_process');
+      const args = ['-i', tmpWebm, '-c:a', 'libmp3lame', '-q:a', '4', tmpMp3, '-y'];
+      console.log('[convert-audio] ffmpeg args:', args.join(' '));
+      const proc = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+      let stderr = '';
+      proc.stderr.on('data', (d) => { stderr += d.toString(); });
+      proc.on('close', (code) => {
+        if (code === 0) resolve();
+        else reject(new Error('ffmpeg exit ' + code + ': ' + stderr.slice(-300)));
+      });
+    });
+
+    const mp3Buf = await fsp.readFile(tmpMp3);
+    console.log('[convert-audio] mp3 size:', mp3Buf.length);
+
+    // Upload to Supabase
+    const mp3Path = `tmp/converted_${ts}.mp3`;
+    const { error: uploadErr } = await supabase.storage
+      .from('recordings')
+      .upload(mp3Path, mp3Buf, { contentType: 'audio/mpeg', upsert: true });
+    if (uploadErr) throw new Error('Supabase upload failed: ' + uploadErr.message);
+
+    const { data } = supabase.storage.from('recordings').getPublicUrl(mp3Path);
+    console.log('[convert-audio] mp3Url:', data.publicUrl);
+    res.json({ success: true, mp3Url: data.publicUrl });
+  } catch (err) {
+    console.error('[convert-audio] ERROR:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  } finally {
+    if (tmpWebm) await fsp.unlink(tmpWebm).catch(() => {});
+    if (tmpMp3) await fsp.unlink(tmpMp3).catch(() => {});
+  }
+});
+
 app.post('/merge', async (req, res) => {
   const requestId = crypto.randomUUID();
   let workDir = null;
@@ -438,11 +494,9 @@ app.post('/merge', async (req, res) => {
         }
       }
 
-      // Step 3: burn watermark
-      const watermarkText = isDirectorPass ? 'heavencinema.ai' : 'getscriptflow.com';
-      const fontsize = isDirectorPass ? 24 : 28;
-      const fontcolor = isDirectorPass ? 'white@0.6' : 'white@0.8';
-      const drawtext = "drawtext=fontfile='" + DEJAVU_FONT + "':text='" + watermarkText + "':fontsize=22:fontcolor=white@0.6:borderw=2:bordercolor=black@0.5:x=w-tw-20:y=20";
+      // Step 3: burn watermark — bottom-right, clearly visible
+      const watermarkText = 'getscriptflow.com';
+      const drawtext = "drawtext=fontfile='" + DEJAVU_FONT + "':text='" + watermarkText + "':fontsize=30:fontcolor=white@0.7:borderw=2:bordercolor=black@0.5:x=(w-tw)/2:y=h*0.82:enable='if(gte(t,2),1,0)'";
 
       console.log('[watermark][' + requestId + '] tier=' + (isDirectorPass ? 'director_pass' : 'basic') + ' text="' + watermarkText + '"');
 
