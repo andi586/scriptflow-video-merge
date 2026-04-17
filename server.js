@@ -710,34 +710,28 @@ app.listen(PORT, () => {
 // Downloads all videos, concatenates them in order,
 // uploads to Supabase generated-videos bucket, returns { outputUrl }
 app.post('/concat-videos', async (req, res) => {
-  const body = req.body || {};
+  const { videoUrls, outputName, sceneVideoUrl, faceVideoUrl } = req.body || {};
 
-  // Support both new array format and legacy two-video format
-  let videoUrls;
-  let outputName;
-  if (Array.isArray(body.videoUrls) && body.videoUrls.length > 0) {
-    videoUrls = body.videoUrls;
-    outputName = body.outputName || `concat_${Date.now()}`;
-  } else if (body.sceneVideoUrl && body.faceVideoUrl) {
-    // Legacy format: scene first, face second
-    videoUrls = [body.sceneVideoUrl, body.faceVideoUrl];
-    outputName = `concat_${Date.now()}`;
-  } else {
-    return res.status(400).json({ error: 'videoUrls array (or sceneVideoUrl + faceVideoUrl) is required' });
+  // Handle both new format (videoUrls array) and legacy format
+  const urls = videoUrls ?? [sceneVideoUrl, faceVideoUrl].filter(Boolean);
+
+  if (!urls || urls.length === 0) {
+    return res.status(400).json({ error: 'videoUrls array is required' });
   }
 
-  console.log('[concat-videos] videoUrls count:', videoUrls.length, 'outputName:', outputName);
+  const resolvedOutputName = outputName || `concat_${Date.now()}`;
+
   const tmpDir = os.tmpdir();
   const id = crypto.randomBytes(8).toString('hex');
-  const videoPaths = videoUrls.map((_, i) => path.join(tmpDir, `cv_${id}_${i}.mp4`));
+  const videoPaths = urls.map((_, i) => path.join(tmpDir, `cv_${id}_${i}.mp4`));
   const listPath = path.join(tmpDir, `cvlist_${id}.txt`);
   const outputPath = path.join(tmpDir, `cvout_${id}.mp4`);
 
   try {
     // Download all videos in parallel
-    const downloadResults = await Promise.all(videoUrls.map(url => fetch(url)));
+    const downloadResults = await Promise.all(urls.map(url => fetch(url)));
     for (let i = 0; i < downloadResults.length; i++) {
-      if (!downloadResults[i].ok) throw new Error(`Video ${i} download failed: ${downloadResults[i].status} ${videoUrls[i]}`);
+      if (!downloadResults[i].ok) throw new Error(`Video ${i} download failed: ${downloadResults[i].status} ${urls[i]}`);
     }
     await Promise.all(downloadResults.map((r, i) =>
       r.arrayBuffer().then(buf => fsp.writeFile(videoPaths[i], Buffer.from(buf)))
@@ -771,7 +765,7 @@ app.post('/concat-videos', async (req, res) => {
 
     // Upload to Supabase
     const outputBuffer = await fsp.readFile(outputPath);
-    const storagePath = `concat/${outputName}_${Date.now()}.mp4`;
+    const storagePath = `concat/${resolvedOutputName}_${Date.now()}.mp4`;
     const { data: uploadData, error: uploadError } = await supabase.storage
       .from('generated-videos')
       .upload(storagePath, outputBuffer, { contentType: 'video/mp4', upsert: true });
