@@ -429,7 +429,7 @@ app.post('/merge', async (req, res) => {
       const { spawn } = require('child_process');
       const args = [
         '-i', finalPath,
-        '-vf', 'eq=contrast=1.05:saturation=0.92',
+        '-vf', 'eq=contrast=1.02:saturation=0.95:brightness=0.03:gamma=0.95,unsharp=3:3:0.3:3:3:0,gblur=sigma=0.4',
         '-af', 'loudnorm=I=-16:LRA=11:TP=-1.5',
         '-c:v', 'libx264',
         '-crf', '23',
@@ -701,4 +701,376 @@ app.listen(PORT, () => {
   fontPaths.forEach(p => {
     console.log('[font-check] ' + p + ': ' + (fs.existsSync(p) ? 'EXISTS' : 'NOT FOUND'));
   });
+});
+
+// ─── POST /concat-videos ─────────────────────────────────────────────────────
+// Accepts either:
+//   { videoUrls: string[], outputName?: string }  (new worker format)
+//   { sceneVideoUrl: string, faceVideoUrl: string }  (legacy format)
+// Downloads all videos, concatenates them in order,
+// uploads to Supabase generated-videos bucket, returns { outputUrl }
+app.post('/concat-videos', async (req, res) => {
+  const body = req.body || {};
+
+  // Support both new array format and legacy two-video format
+  let videoUrls;
+  let outputName;
+  if (Array.isArray(body.videoUrls) && body.videoUrls.length > 0) {
+    videoUrls = body.videoUrls;
+    outputName = body.outputName || `concat_${Date.now()}`;
+  } else if (body.sceneVideoUrl && body.faceVideoUrl) {
+    // Legacy format: scene first, face second
+    videoUrls = [body.sceneVideoUrl, body.faceVideoUrl];
+    outputName = `concat_${Date.now()}`;
+  } else {
+    return res.status(400).json({ error: 'videoUrls array (or sceneVideoUrl + faceVideoUrl) is required' });
+  }
+
+  console.log('[concat-videos] videoUrls count:', videoUrls.length, 'outputName:', outputName);
+  const tmpDir = os.tmpdir();
+  const id = crypto.randomBytes(8).toString('hex');
+  const videoPaths = videoUrls.map((_, i) => path.join(tmpDir, `cv_${id}_${i}.mp4`));
+  const listPath = path.join(tmpDir, `cvlist_${id}.txt`);
+  const outputPath = path.join(tmpDir, `cvout_${id}.mp4`);
+
+  try {
+    // Download all videos in parallel
+    const downloadResults = await Promise.all(videoUrls.map(url => fetch(url)));
+    for (let i = 0; i < downloadResults.length; i++) {
+      if (!downloadResults[i].ok) throw new Error(`Video ${i} download failed: ${downloadResults[i].status} ${videoUrls[i]}`);
+    }
+    await Promise.all(downloadResults.map((r, i) =>
+      r.arrayBuffer().then(buf => fsp.writeFile(videoPaths[i], Buffer.from(buf)))
+    ));
+    console.log('[concat-videos] downloaded', videoPaths.length, 'videos');
+
+    // Write concat list file
+    const listContent = videoPaths.map(p => `file '${path.resolve(p).replace(/'/g, "'\\''")}'`).join('\n');
+    await fsp.writeFile(listPath, listContent, 'utf8');
+
+    // Concatenate using ffmpeg concat demuxer (fast, no re-encode)
+    await new Promise((resolve, reject) => {
+      const { spawn } = require('child_process');
+      const args = [
+        '-f', 'concat',
+        '-safe', '0',
+        '-i', listPath,
+        '-c', 'copy',
+        '-y',
+        outputPath
+      ];
+      console.log('[concat-videos] ffmpeg args:', args.join(' '));
+      const proc = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+      let stderr = '';
+      proc.stderr.on('data', (d) => { stderr += d.toString(); });
+      proc.on('close', (code) => {
+        if (code === 0) resolve();
+        else reject(new Error('ffmpeg exit ' + code + ': ' + stderr.slice(-300)));
+      });
+    });
+
+    // Upload to Supabase
+    const outputBuffer = await fsp.readFile(outputPath);
+    const storagePath = `concat/${outputName}_${Date.now()}.mp4`;
+    const { data: uploadData, error: uploadError } = await supabase.storage
+      .from('generated-videos')
+      .upload(storagePath, outputBuffer, { contentType: 'video/mp4', upsert: true });
+
+    if (uploadError) throw new Error(`Supabase upload failed: ${uploadError.message}`);
+
+    const outputUrl = supabase.storage.from('generated-videos').getPublicUrl(uploadData.path).data.publicUrl;
+    console.log('[concat-videos] outputUrl:', outputUrl);
+    res.json({ outputUrl });
+  } catch (err) {
+    console.error('[concat-videos] ERROR:', err.message || err);
+    res.status(500).json({ error: err.message || 'concat-videos failed' });
+  } finally {
+    for (const p of videoPaths) fsp.unlink(p).catch(() => {});
+    fsp.unlink(listPath).catch(() => {});
+    fsp.unlink(outputPath).catch(() => {});
+  }
+});
+
+// ─── POST /merge-videos ──────────────────────────────────────────────────────
+// Merges a video with an optional audio track.
+// For face shots: videoUrl = omni_video_url, audioUrl = kling audio
+// For scene shots: videoUrl = kling_scene_url, audioUrl = null (use video's own audio)
+// Returns { outputUrl }
+app.post('/merge-videos', async (req, res) => {
+  const { videoUrl, audioUrl } = req.body || {};
+  if (!videoUrl) return res.status(400).json({ error: 'videoUrl is required' });
+
+  console.log('[merge-videos] videoUrl:', videoUrl, 'audioUrl:', audioUrl || '(none)');
+  const tmpDir = os.tmpdir();
+  const id = crypto.randomBytes(8).toString('hex');
+  const videoPath = path.join(tmpDir, `mv_${id}.mp4`);
+  const audioPath = audioUrl ? path.join(tmpDir, `ma_${id}.mp3`) : null;
+  const outputPath = path.join(tmpDir, `mvout_${id}.mp4`);
+
+  try {
+    // Download video (and audio if provided)
+    const downloads = [fetch(videoUrl)];
+    if (audioUrl) downloads.push(fetch(audioUrl));
+    const results = await Promise.all(downloads);
+
+    if (!results[0].ok) throw new Error(`Video download failed: ${results[0].status}`);
+    await fsp.writeFile(videoPath, Buffer.from(await results[0].arrayBuffer()));
+
+    if (audioUrl && results[1]) {
+      if (!results[1].ok) throw new Error(`Audio download failed: ${results[1].status}`);
+      await fsp.writeFile(audioPath, Buffer.from(await results[1].arrayBuffer()));
+    }
+
+    console.log('[merge-videos] downloaded video' + (audioUrl ? ' and audio' : ''));
+
+    // Merge or copy
+    await new Promise((resolve, reject) => {
+      const { spawn } = require('child_process');
+      let args;
+      if (audioPath) {
+        // Replace video audio with provided audio track
+        args = [
+          '-i', videoPath,
+          '-i', audioPath,
+          '-c:v', 'copy',
+          '-c:a', 'aac',
+          '-b:a', '192k',
+          '-map', '0:v:0',
+          '-map', '1:a:0',
+          '-shortest',
+          '-y',
+          outputPath,
+        ];
+      } else {
+        // No audio replacement: just copy the video as-is
+        args = [
+          '-i', videoPath,
+          '-c', 'copy',
+          '-y',
+          outputPath,
+        ];
+      }
+      console.log('[merge-videos] ffmpeg args:', args.join(' '));
+      const proc = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+      let stderr = '';
+      proc.stderr.on('data', (d) => { stderr += d.toString(); });
+      proc.on('close', (code) => {
+        if (code === 0) resolve();
+        else reject(new Error('ffmpeg exit ' + code + ': ' + stderr.slice(-300)));
+      });
+    });
+
+    // Upload to Supabase generated-videos bucket
+    const outputBuffer = await fsp.readFile(outputPath);
+    const storagePath = `shots/shot_${Date.now()}.mp4`;
+    const { data: uploadData, error: uploadError } = await supabase.storage
+      .from('generated-videos')
+      .upload(storagePath, outputBuffer, { contentType: 'video/mp4', upsert: true });
+
+    if (uploadError) throw new Error(`Supabase upload failed: ${uploadError.message}`);
+
+    const outputUrl = supabase.storage.from('generated-videos').getPublicUrl(uploadData.path).data.publicUrl;
+    console.log('[merge-videos] outputUrl:', outputUrl);
+    res.json({ outputUrl });
+  } catch (err) {
+    console.error('[merge-videos] ERROR:', err.message || err);
+    res.status(500).json({ error: err.message || 'merge-videos failed' });
+  } finally {
+    fsp.unlink(videoPath).catch(() => {});
+    if (audioPath) fsp.unlink(audioPath).catch(() => {});
+    fsp.unlink(outputPath).catch(() => {});
+  }
+});
+
+// ─── POST /merge-audio ───────────────────────────────────────────────────────
+// Downloads a video and audio file, merges them with ffmpeg, uploads to Supabase.
+// Returns { outputUrl }
+app.post('/merge-audio', async (req, res) => {
+  const { videoUrl, audioUrl } = req.body || {};
+  if (!videoUrl || !audioUrl) return res.status(400).json({ error: 'videoUrl and audioUrl are required' });
+
+  console.log('[merge-audio] videoUrl:', videoUrl, 'audioUrl:', audioUrl);
+  const tmpDir = os.tmpdir();
+  const id = crypto.randomBytes(8).toString('hex');
+  const videoPath = path.join(tmpDir, `mv_${id}.mp4`);
+  const audioPath = path.join(tmpDir, `ma_${id}.mp3`);
+  const outputPath = path.join(tmpDir, `out_${id}.mp4`);
+
+  try {
+    // Download video and audio in parallel
+    const [videoRes, audioRes] = await Promise.all([fetch(videoUrl), fetch(audioUrl)]);
+    if (!videoRes.ok) throw new Error(`Video download failed: ${videoRes.status}`);
+    if (!audioRes.ok) throw new Error(`Audio download failed: ${audioRes.status}`);
+    await Promise.all([
+      fsp.writeFile(videoPath, Buffer.from(await videoRes.arrayBuffer())),
+      fsp.writeFile(audioPath, Buffer.from(await audioRes.arrayBuffer())),
+    ]);
+    console.log('[merge-audio] downloaded video and audio');
+
+    // Merge: copy video stream, re-encode audio, stop at shortest
+    await new Promise((resolve, reject) => {
+      const { spawn } = require('child_process');
+      const args = [
+        '-i', videoPath,
+        '-i', audioPath,
+        '-c:v', 'copy',
+        '-c:a', 'aac',
+        '-b:a', '192k',
+        '-shortest',
+        '-y',
+        outputPath,
+      ];
+      console.log('[merge-audio] ffmpeg args:', args.join(' '));
+      const proc = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+      let stderr = '';
+      proc.stderr.on('data', (d) => { stderr += d.toString(); });
+      proc.on('close', (code) => {
+        if (code === 0) resolve();
+        else reject(new Error('ffmpeg exit ' + code + ': ' + stderr.slice(-300)));
+      });
+    });
+
+    // Upload to Supabase generated-videos bucket
+    const outputBuffer = await fsp.readFile(outputPath);
+    const storagePath = `merged/audio_${Date.now()}.mp4`;
+    const { data: uploadData, error: uploadError } = await supabase.storage
+      .from('generated-videos')
+      .upload(storagePath, outputBuffer, { contentType: 'video/mp4', upsert: true });
+
+    if (uploadError) throw new Error(`Supabase upload failed: ${uploadError.message}`);
+
+    const outputUrl = supabase.storage.from('generated-videos').getPublicUrl(uploadData.path).data.publicUrl;
+    console.log('[merge-audio] outputUrl:', outputUrl);
+    res.json({ outputUrl });
+  } catch (err) {
+    console.error('[merge-audio] ERROR:', err.message || err);
+    res.status(500).json({ error: err.message || 'merge-audio failed' });
+  } finally {
+    fsp.unlink(videoPath).catch(() => {});
+    fsp.unlink(audioPath).catch(() => {});
+    fsp.unlink(outputPath).catch(() => {});
+  }
+});
+
+// ─── POST /extract-frame ──────────────────────────────────────────────────────
+// Downloads a video from videoUrl, extracts a frame at 50% duration via ffmpeg,
+// uploads it to Supabase recordings/tmp/frame_{timestamp}.jpg, returns { frameUrl }.
+app.post('/extract-frame', async (req, res) => {
+  const { videoUrl } = req.body || {};
+  if (!videoUrl) return res.status(400).json({ error: 'videoUrl is required' });
+
+  console.log('[extract-frame] videoUrl:', videoUrl);
+  const tmpDir = os.tmpdir();
+  const id = crypto.randomBytes(8).toString('hex');
+  const videoPath = path.join(tmpDir, `video_${id}.mp4`);
+  const framePath = path.join(tmpDir, `frame_${id}.jpg`);
+
+  try {
+    // Step 1: Download video
+    const videoRes = await fetch(videoUrl);
+    if (!videoRes.ok) throw new Error(`Failed to download video: ${videoRes.status}`);
+    const videoBuffer = Buffer.from(await videoRes.arrayBuffer());
+    await fsp.writeFile(videoPath, videoBuffer);
+    console.log('[extract-frame] video downloaded, size:', videoBuffer.length);
+
+    // Step 2: Get video duration via ffprobe
+    let rawDuration = null;
+    try {
+      rawDuration = await new Promise((resolve) => {
+        ffmpeg.ffprobe(videoPath, (err, metadata) => {
+          if (err) { console.warn('[extract-frame] ffprobe error:', err.message); return resolve(null); }
+          const d = metadata?.format?.duration;
+          resolve(d);
+        });
+      });
+    } catch (probeErr) {
+      console.warn('[extract-frame] ffprobe threw:', probeErr.message);
+    }
+
+    // Handle N/A or missing duration (common with webm/mkv containers)
+    const seekTime = (rawDuration && rawDuration !== 'N/A' && !isNaN(parseFloat(rawDuration)))
+      ? (parseFloat(rawDuration) * 0.5).toFixed(2)
+      : '0.5'; // default to 0.5s if duration unknown
+    console.log('[extract-frame] rawDuration:', rawDuration, 'seekTime:', seekTime);
+
+    // Step 3: Extract frame using raw ffmpeg spawn (-ss before -i for fast seeking)
+    await new Promise((resolve, reject) => {
+      const { spawn } = require('child_process');
+      const args = ['-ss', seekTime, '-i', videoPath, '-frames:v', '1', '-f', 'image2', '-vcodec', 'mjpeg', '-y', framePath];
+      console.log('[extract-frame] ffmpeg args:', args.join(' '));
+      const proc = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+      let stderr = '';
+      proc.stderr.on('data', (d) => { stderr += d.toString(); });
+      proc.on('close', (code) => {
+        if (code === 0) resolve();
+        else reject(new Error('ffmpeg exit ' + code + ': ' + stderr.slice(-300)));
+      });
+    });
+
+    // Step 4: Upload frame to Supabase
+    const frameBuffer = await fsp.readFile(framePath);
+    const filePath = `tmp/frame_${Date.now()}.jpg`;
+    const { data: uploadData, error: uploadError } = await supabase.storage
+      .from('recordings')
+      .upload(filePath, frameBuffer, { contentType: 'image/jpeg', upsert: true });
+
+    if (uploadError) throw new Error(`Supabase upload failed: ${uploadError.message}`);
+
+    const frameUrl = supabase.storage.from('recordings').getPublicUrl(uploadData.path).data.publicUrl;
+    console.log('[extract-frame] frameUrl:', frameUrl);
+
+    res.json({ frameUrl });
+  } catch (err) {
+    console.error('[extract-frame] ERROR:', err.message || err);
+    res.status(500).json({ error: err.message || 'extract-frame failed' });
+  } finally {
+    // Cleanup temp files
+    fsp.unlink(videoPath).catch(() => {});
+    fsp.unlink(framePath).catch(() => {});
+  }
+});
+
+// ─── POST /extract-audio ──────────────────────────────────────────────────────
+app.post('/extract-audio', async (req, res) => {
+  const videoPath = path.join(os.tmpdir(), `voice_input_${Date.now()}.mp4`);
+  const audioPath = path.join(os.tmpdir(), `voice_output_${Date.now()}.mp3`);
+  try {
+    const { videoUrl } = req.body;
+    if (!videoUrl) return res.status(400).json({ error: 'videoUrl is required' });
+
+    console.log('[extract-audio] Downloading video:', videoUrl);
+    const response = await fetch(videoUrl);
+    if (!response.ok) throw new Error(`Failed to download video: ${response.status}`);
+    const buffer = await response.arrayBuffer();
+    await fsp.writeFile(videoPath, Buffer.from(buffer));
+
+    // Extract audio with FFmpeg
+    console.log('[extract-audio] Extracting audio...');
+    await new Promise((resolve, reject) => {
+      const { spawn } = require('child_process');
+      const ffmpegProc = spawn('ffmpeg', ['-i', videoPath, '-vn', '-acodec', 'libmp3lame', '-q:a', '4', '-y', audioPath]);
+      ffmpegProc.stderr.on('data', (d) => process.stderr.write(d));
+      ffmpegProc.on('close', (code) => code === 0 ? resolve() : reject(new Error(`FFmpeg exited with code ${code}`)));
+    });
+
+    // Upload to Supabase
+    const audioBuffer = await fsp.readFile(audioPath);
+    const fileName = `voice_samples/voice_${Date.now()}.mp3`;
+    const { data: uploadData, error: uploadError } = await supabase.storage
+      .from('recordings')
+      .upload(fileName, audioBuffer, { contentType: 'audio/mpeg', upsert: true });
+
+    if (uploadError) throw new Error(`Supabase upload failed: ${uploadError.message}`);
+
+    const audioUrl = supabase.storage.from('recordings').getPublicUrl(uploadData.path).data.publicUrl;
+    console.log('[extract-audio] audioUrl:', audioUrl);
+
+    res.json({ audioUrl });
+  } catch (err) {
+    console.error('[extract-audio] ERROR:', err.message || err);
+    res.status(500).json({ error: err.message || 'extract-audio failed' });
+  } finally {
+    fsp.unlink(videoPath).catch(() => {});
+    fsp.unlink(audioPath).catch(() => {});
+  }
 });
