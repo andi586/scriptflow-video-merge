@@ -880,10 +880,11 @@ app.post('/merge-videos', async (req, res) => {
 // Downloads a video and audio file, merges them with ffmpeg, uploads to Supabase.
 // Returns { outputUrl }
 app.post('/merge-audio', async (req, res) => {
-  const { videoUrl, audioUrl } = req.body || {};
-  if (!videoUrl || !audioUrl) return res.status(400).json({ error: 'videoUrl and audioUrl are required' });
+  const { videoUrl, imageUrl, audioUrl } = req.body || {};
+  const sourceUrl = imageUrl || videoUrl;
+  if (!sourceUrl || !audioUrl) return res.status(400).json({ error: 'videoUrl (or imageUrl) and audioUrl are required' });
 
-  console.log('[merge-audio] videoUrl:', videoUrl, 'audioUrl:', audioUrl);
+  console.log('[merge-audio] sourceUrl:', sourceUrl, 'audioUrl:', audioUrl);
   const tmpDir = os.tmpdir();
   const id = crypto.randomBytes(8).toString('hex');
   const videoPath = path.join(tmpDir, `mv_${id}.mp4`);
@@ -891,26 +892,29 @@ app.post('/merge-audio', async (req, res) => {
   const outputPath = path.join(tmpDir, `out_${id}.mp4`);
 
   try {
-    // Download video and audio in parallel
-    const [videoRes, audioRes] = await Promise.all([fetch(videoUrl), fetch(audioUrl)]);
-    if (!videoRes.ok) throw new Error(`Video download failed: ${videoRes.status}`);
+    // Download source (image or video) and audio in parallel
+    const [videoRes, audioRes] = await Promise.all([fetch(sourceUrl), fetch(audioUrl)]);
+    if (!videoRes.ok) throw new Error(`Source download failed: ${videoRes.status}`);
     if (!audioRes.ok) throw new Error(`Audio download failed: ${audioRes.status}`);
     await Promise.all([
       fsp.writeFile(videoPath, Buffer.from(await videoRes.arrayBuffer())),
       fsp.writeFile(audioPath, Buffer.from(await audioRes.arrayBuffer())),
     ]);
-    console.log('[merge-audio] downloaded video and audio');
+    console.log('[merge-audio] downloaded source and audio');
 
-    // Merge: copy video stream, re-encode audio, stop at shortest
+    // Merge: treat input as static image (loop it for the duration of the audio)
     await new Promise((resolve, reject) => {
       const { spawn } = require('child_process');
       const args = [
-        '-i', videoPath,
-        '-i', audioPath,
-        '-c:v', 'copy',
+        '-loop', '1',          // loop the image
+        '-i', videoPath,       // input image
+        '-i', audioPath,       // input audio
+        '-c:v', 'libx264',     // encode image as video
+        '-tune', 'stillimage', // optimize for still image
         '-c:a', 'aac',
         '-b:a', '192k',
-        '-shortest',
+        '-pix_fmt', 'yuv420p', // compatible pixel format
+        '-shortest',           // stop when audio ends
         '-y',
         outputPath,
       ];
