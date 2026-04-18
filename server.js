@@ -884,7 +884,8 @@ app.post('/merge-audio', async (req, res) => {
   const sourceUrl = imageUrl || videoUrl;
   if (!sourceUrl || !audioUrl) return res.status(400).json({ error: 'videoUrl (or imageUrl) and audioUrl are required' });
 
-  console.log('[merge-audio] sourceUrl:', sourceUrl, 'audioUrl:', audioUrl);
+  const isImage = sourceUrl.match(/\.(jpg|jpeg|png|gif|webp)$/i);
+  console.log('[merge-audio] sourceUrl:', sourceUrl, 'audioUrl:', audioUrl, 'isImage:', !!isImage);
   const tmpDir = os.tmpdir();
   const id = crypto.randomBytes(8).toString('hex');
   const videoPath = path.join(tmpDir, `mv_${id}.mp4`);
@@ -902,23 +903,36 @@ app.post('/merge-audio', async (req, res) => {
     ]);
     console.log('[merge-audio] downloaded source and audio');
 
-    // Merge: treat input as static image (loop it for the duration of the audio)
+    // Merge: use different args depending on whether source is image or video
     await new Promise((resolve, reject) => {
       const { spawn } = require('child_process');
-      const args = [
-        '-loop', '1',          // loop the image
-        '-i', videoPath,       // input image
-        '-i', audioPath,       // input audio
-        '-c:v', 'libx264',     // encode image as video
-        '-tune', 'stillimage', // optimize for still image
-        '-c:a', 'aac',
-        '-b:a', '320k',
-        '-ar', '44100',
-        '-pix_fmt', 'yuv420p', // compatible pixel format
-        '-shortest',           // stop when audio ends
-        '-y',
-        outputPath,
-      ];
+      let args;
+      if (isImage) {
+        args = [
+          '-loop', '1',
+          '-i', videoPath,
+          '-i', audioPath,
+          '-c:v', 'libx264',
+          '-tune', 'stillimage',
+          '-c:a', 'aac',
+          '-b:a', '192k',
+          '-pix_fmt', 'yuv420p',
+          '-shortest',
+          '-y',
+          outputPath,
+        ];
+      } else {
+        args = [
+          '-i', videoPath,
+          '-i', audioPath,
+          '-c:v', 'copy',
+          '-c:a', 'aac',
+          '-b:a', '192k',
+          '-shortest',
+          '-y',
+          outputPath,
+        ];
+      }
       console.log('[merge-audio] ffmpeg args:', args.join(' '));
       const proc = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] });
       let stderr = '';
