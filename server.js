@@ -912,7 +912,8 @@ app.post('/merge-audio', async (req, res) => {
         '-c:v', 'libx264',     // encode image as video
         '-tune', 'stillimage', // optimize for still image
         '-c:a', 'aac',
-        '-b:a', '192k',
+        '-b:a', '320k',
+        '-ar', '44100',
         '-pix_fmt', 'yuv420p', // compatible pixel format
         '-shortest',           // stop when audio ends
         '-y',
