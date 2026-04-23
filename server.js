@@ -353,8 +353,13 @@ app.post('/merge', async (req, res) => {
           outputOptions.push('-map', '0:v:0', '-map', dialogueIdx + ':a:0', ...aacOpts, '-shortest');
           if (srtEscaped) outputOptions.push("-vf subtitles='" + srtEscaped + "':force_style='" + subtitleStyle + "'");
         } else if (bgmIdx !== null) {
-          // BGM only (no dialogue audio)
-          outputOptions.push('-filter_complex', '[' + bgmIdx + ':a]volume=0.4,aloop=loop=-1:size=2147483647[aout]');
+          // Mix original video audio with BGM using sidechain compression
+          outputOptions.push('-filter_complex',
+            '[' + bgmIdx + ':a]volume=0.4,aloop=loop=-1:size=2147483647[bgm];' +
+            '[bgm][0:a]sidechaincompress=threshold=0.02:ratio=8:attack=20:release=300[bgm_ducked];' +
+            '[0:a]volume=0.85[orig];' +
+            '[orig][bgm_ducked]amix=inputs=2:duration=longest[aout]'
+          );
           outputOptions.push('-map', '0:v:0', '-map', '[aout]', ...aacOpts, '-shortest');
         } else {
           outputOptions.push('-c:a', 'copy');
@@ -1040,6 +1045,175 @@ app.post('/extract-frame', async (req, res) => {
     // Cleanup temp files
     fsp.unlink(videoPath).catch(() => {});
     fsp.unlink(framePath).catch(() => {});
+  }
+});
+
+// ─── POST /hook ───────────────────────────────────────────────────────────────
+// Creates a 15-second hook video: static photo + TTS audio lines + subtitles + BGM
+// Body: { photoUrl, audioUrls, subtitles, bgmUrl, duration, projectId }
+// Returns: { success, hookVideoUrl }
+app.post('/hook', async (req, res) => {
+  const requestId = crypto.randomUUID();
+  let workDir = null;
+  try {
+    const { photoUrl, audioUrls, subtitles, bgmUrl, duration = 15, projectId } = req.body || {};
+
+    if (!photoUrl) return res.status(400).json({ success: false, error: 'photoUrl is required' });
+    if (!Array.isArray(audioUrls) || audioUrls.length === 0) return res.status(400).json({ success: false, error: 'audioUrls is required' });
+    if (!Array.isArray(subtitles) || subtitles.length === 0) return res.status(400).json({ success: false, error: 'subtitles is required' });
+
+    workDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hook-'));
+    console.log('[hook][' + requestId + '] workDir:', workDir);
+
+    // Step 1: Download photo
+    const photoPath = path.join(workDir, 'photo.jpg');
+    const photoRes = await fetch(photoUrl);
+    if (!photoRes.ok) throw new Error('Photo download failed: ' + photoUrl);
+    await fsp.writeFile(photoPath, Buffer.from(await photoRes.arrayBuffer()));
+    console.log('[hook] photo downloaded');
+
+    // Step 2: Download audio files
+    const audioPaths = [];
+    for (let i = 0; i < audioUrls.length; i++) {
+      const ap = path.join(workDir, 'audio_' + i + '.mp3');
+      const ar = await fetch(audioUrls[i]);
+      if (!ar.ok) throw new Error('Audio ' + i + ' download failed');
+      await fsp.writeFile(ap, Buffer.from(await ar.arrayBuffer()));
+      audioPaths.push(ap);
+    }
+    console.log('[hook] audio files downloaded:', audioPaths.length);
+
+    // Step 3: Concatenate audio files into one track
+    const concatAudioPath = path.join(workDir, 'audio_concat.mp3');
+    if (audioPaths.length === 1) {
+      await fsp.copyFile(audioPaths[0], concatAudioPath);
+    } else {
+      const audioListPath = path.join(workDir, 'alist.txt');
+      const audioListContent = audioPaths.map(p => "file '" + path.resolve(p).replace(/'/g, "'\\''") + "'").join('\n');
+      await fsp.writeFile(audioListPath, audioListContent, 'utf8');
+      await new Promise((resolve, reject) => {
+        const { spawn } = require('child_process');
+        const args = ['-f', 'concat', '-safe', '0', '-i', audioListPath, '-c', 'copy', '-y', concatAudioPath];
+        const proc = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+        let stderr = '';
+        proc.stderr.on('data', (d) => { stderr += d.toString(); });
+        proc.on('close', (code) => {
+          if (code === 0) resolve();
+          else reject(new Error('audio concat ffmpeg exit ' + code + ': ' + stderr.slice(-300)));
+        });
+      });
+    }
+    console.log('[hook] audio concatenated');
+
+    // Step 4: Download BGM
+    let bgmPath = null;
+    if (bgmUrl) {
+      try {
+        bgmPath = path.join(workDir, 'bgm.mp3');
+        const bgmRes = await fetch(bgmUrl);
+        if (bgmRes.ok) {
+          await fsp.writeFile(bgmPath, Buffer.from(await bgmRes.arrayBuffer()));
+          console.log('[hook] BGM downloaded');
+        } else {
+          bgmPath = null;
+        }
+      } catch (bgmErr) {
+        console.warn('[hook] BGM download failed (skipping):', bgmErr.message);
+        bgmPath = null;
+      }
+    }
+
+    // Step 5: Build subtitle drawtext filters from subtitles array
+    // subtitles: [{ text, startTime, endTime }]
+    const fontPath = getFontForLanguage('zh'); // default CJK-capable font
+    const drawtextFilters = subtitles.map(({ text, startTime, endTime }) => {
+      const escaped = escapeDrawtext(text);
+      return "drawtext=fontfile='" + fontPath + "':text='" + escaped + "':fontsize=48:fontcolor=white:borderw=3:bordercolor=black:x=(w-tw)/2:y=h*0.82:enable='between(t," + startTime + "," + endTime + ")'";
+    }).join(',');
+
+    // Step 6: Build hook video with FFmpeg
+    // Photo → 15s video + audio overlay + subtitles + BGM + fade to black at end
+    const hookVideoPath = path.join(workDir, 'hook.mp4');
+    const fadeDuration = 2;
+    const fadeStart = duration - fadeDuration;
+
+    await new Promise((resolve, reject) => {
+      const { spawn } = require('child_process');
+
+      // Build filter_complex
+      let filterComplex;
+      let mapArgs;
+
+      const videoFilter = [
+        'scale=1080:1920:force_original_aspect_ratio=decrease',
+        'pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black',
+        drawtextFilters,
+        'fade=t=out:st=' + fadeStart + ':d=' + fadeDuration,
+      ].filter(Boolean).join(',');
+
+      if (bgmPath) {
+        filterComplex =
+          '[0:v]' + videoFilter + '[vout];' +
+          '[1:a]volume=1.0[dialogue];' +
+          '[2:a]volume=0.12,aloop=loop=-1:size=2147483647[bgm];' +
+          '[dialogue][bgm]amix=inputs=2:duration=first[aout]';
+        mapArgs = ['-map', '[vout]', '-map', '[aout]'];
+      } else {
+        filterComplex = '[0:v]' + videoFilter + '[vout]';
+        mapArgs = ['-map', '[vout]', '-map', '1:a'];
+      }
+
+      const args = [
+        '-loop', '1', '-i', photoPath,
+        '-i', concatAudioPath,
+        ...(bgmPath ? ['-i', bgmPath] : []),
+        '-filter_complex', filterComplex,
+        ...mapArgs,
+        '-c:v', 'libx264',
+        '-preset', 'veryfast',
+        '-crf', '23',
+        '-pix_fmt', 'yuv420p',
+        '-c:a', 'aac',
+        '-b:a', '192k',
+        '-ar', '48000',
+        '-ac', '2',
+        '-t', String(duration),
+        '-shortest',
+        '-y',
+        hookVideoPath,
+      ];
+
+      console.log('[hook] ffmpeg args:', args.join(' '));
+      const proc = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+      let stderr = '';
+      proc.stderr.on('data', (d) => { stderr += d.toString(); });
+      proc.on('close', (code) => {
+        if (code === 0) resolve();
+        else reject(new Error('hook ffmpeg exit ' + code + ': ' + stderr.slice(-500)));
+      });
+    });
+
+    console.log('[hook] video built');
+
+    // Step 7: Upload to Supabase
+    const hookBuf = await fsp.readFile(hookVideoPath);
+    const storagePath = 'hooks/' + (projectId || 'unknown') + '/hook_' + Date.now() + '.mp4';
+    const { error: uploadError } = await supabase.storage
+      .from('generated-videos')
+      .upload(storagePath, hookBuf, { contentType: 'video/mp4', upsert: true });
+
+    if (uploadError) throw new Error('Upload failed: ' + uploadError.message);
+
+    const { data: pub } = supabase.storage.from('generated-videos').getPublicUrl(storagePath);
+    const hookVideoUrl = pub.publicUrl;
+    console.log('[hook][' + requestId + '] done:', hookVideoUrl);
+
+    res.json({ success: true, hookVideoUrl });
+  } catch (err) {
+    console.error('[hook][' + requestId + '] ERROR:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  } finally {
+    if (workDir) await fsp.rm(workDir, { recursive: true, force: true }).catch(() => {});
   }
 });
 
