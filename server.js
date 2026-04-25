@@ -1140,11 +1140,12 @@ app.post('/hook', async (req, res) => {
     const drawtextFilters = subtitles.map(({ text, startTime, endTime }) => {
       const sanitized = sanitizeSubtitle(text);
       const escaped = escapeDrawtext(sanitized);
-      return "drawtext=fontfile='" + fontPath + "':text='" + escaped + "':fontsize=48:fontcolor=white:borderw=3:bordercolor=black:x=(w-tw)/2:y=h*0.82:enable='between(t," + startTime + "," + endTime + ")'";
+      // Large cinematic white text, bottom third, strong drop shadow
+      return "drawtext=fontfile='" + fontPath + "':text='" + escaped + "':fontsize=60:fontcolor=white:shadowcolor=black@0.9:shadowx=3:shadowy=3:borderw=2:bordercolor=black@0.6:x=(w-tw)/2:y=h*0.78:enable='between(t," + startTime + "," + endTime + ")'";
     }).join(',');
 
-    // Step 6: Build hook video with FFmpeg
-    // Photo → 15s video + audio overlay + subtitles + BGM + fade to black at end
+    // Step 6: Build hook video with FFmpeg — cinematic oil painting effect
+    // Photo → Ken Burns zoom + oil painting + color grade + grain + vignette + subtitles + BGM
     const hookVideoPath = path.join(workDir, 'hook.mp4');
     const fadeDuration = 2;
     const fadeStart = duration - fadeDuration;
@@ -1152,26 +1153,41 @@ app.post('/hook', async (req, res) => {
     await new Promise((resolve, reject) => {
       const { spawn } = require('child_process');
 
+      // ── Cinematic oil painting filter chain ──────────────────────────────
+      // 1. Scale to 9:16 with padding
+      // 2. Oil painting: smartblur + unsharp
+      // 3. Color grade: dramatic cinematic (warm shadows, high contrast)
+      // 4. Film grain texture
+      // 5. Strong vignette
+      // 6. Ken Burns slow zoom (zoompan — must come AFTER all pixel filters)
+      // 7. Fade in 1s + fade out 2s
+      // 8. Subtitles (drawtext)
+      const cinematicFilter = [
+        'scale=1080:1920:force_original_aspect_ratio=decrease',
+        'pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black',
+        'smartblur=5:0.8:0,unsharp=5:5:1.5:5:5:0',
+        'colorchannelmixer=rr=1.1:gg=0.95:bb=0.85,eq=contrast=1.4:brightness=-0.05:saturation=1.3:gamma=0.9',
+        'noise=alls=8:allf=t',
+        'vignette=PI/3',
+        "zoompan=z='min(zoom+0.0008,1.08)':d=450:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1080x1920",
+        'fade=t=in:st=0:d=1',
+        'fade=t=out:st=' + fadeStart + ':d=' + fadeDuration,
+        drawtextFilters,
+      ].filter(Boolean).join(',');
+
       // Build filter_complex
       let filterComplex;
       let mapArgs;
 
-      const videoFilter = [
-        'scale=1080:1920:force_original_aspect_ratio=decrease',
-        'pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black',
-        drawtextFilters,
-        'fade=t=out:st=' + fadeStart + ':d=' + fadeDuration,
-      ].filter(Boolean).join(',');
-
       if (bgmPath) {
         filterComplex =
-          '[0:v]' + videoFilter + '[vout];' +
+          '[0:v]' + cinematicFilter + '[vout];' +
           '[1:a]volume=1.0[dialogue];' +
           '[2:a]volume=0.12,aloop=loop=-1:size=2147483647[bgm];' +
           '[dialogue][bgm]amix=inputs=2:duration=first[aout]';
         mapArgs = ['-map', '[vout]', '-map', '[aout]'];
       } else {
-        filterComplex = '[0:v]' + videoFilter + '[vout]';
+        filterComplex = '[0:v]' + cinematicFilter + '[vout]';
         mapArgs = ['-map', '[vout]', '-map', '1:a'];
       }
 
