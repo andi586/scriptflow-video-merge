@@ -1148,194 +1148,192 @@ app.post('/hook', async (req, res) => {
       }
     }
 
-    // Step 5: Remove background with rembg → fg.png
-    const fgPath = path.join(workDir, 'fg.png');
-    const bgBlurPath = path.join(workDir, 'bg_blur.jpg');
-    const zoomVideoPath = path.join(workDir, 'zoom.mp4');
-    let usedParallax = false;
+    // Step 5: Build subtitle drawtext filters
+    const fontPath = DEJAVU_FONT;
+    // Use fixed timing for 3-segment video: line1=1-3s, line2=5-8s, line3=11-14s
+    const fixedSubtitles = subtitles.length >= 3
+      ? [
+          { text: subtitles[0].text, startTime: 1, endTime: 3 },
+          { text: subtitles[1].text, startTime: 5, endTime: 8 },
+          { text: subtitles[2].text, startTime: 11, endTime: 14 },
+        ]
+      : subtitles;
 
-    try {
-      await new Promise((resolve, reject) => {
-        const { spawn } = require('child_process');
-        const scriptPath = path.join(__dirname, 'scripts', 'remove_bg.py');
-        const proc = spawn('python3', [scriptPath, photoPath, fgPath], { stdio: ['ignore', 'pipe', 'pipe'] });
-        let stderr = '';
-        proc.stderr.on('data', (d) => { stderr += d.toString(); });
-        proc.on('close', (code) => {
-          if (code === 0) resolve();
-          else reject(new Error('rembg exit ' + code + ': ' + stderr.slice(-300)));
-        });
-      });
-      console.log('[hook] rembg: foreground extracted');
-
-      // Create blurred background from original photo
-      await new Promise((resolve, reject) => {
-        const { spawn } = require('child_process');
-        const args = [
-          '-i', photoPath,
-          '-vf', 'scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=15:1',
-          '-y', bgBlurPath,
-        ];
-        const proc = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] });
-        let stderr = '';
-        proc.stderr.on('data', (d) => { stderr += d.toString(); });
-        proc.on('close', (code) => {
-          if (code === 0) resolve();
-          else reject(new Error('bg blur ffmpeg exit ' + code + ': ' + stderr.slice(-300)));
-        });
-      });
-      console.log('[hook] blurred background created');
-      usedParallax = true;
-    } catch (rembgErr) {
-      console.warn('[hook] rembg failed (falling back to single-layer mode):', rembgErr.message);
-    }
-
-    // Step 6: Build subtitle drawtext filters from subtitles array
-    // subtitles: [{ text, startTime, endTime }]
-    const fontPath = DEJAVU_FONT; // use DejaVu for reliability
-    const drawtextFilters = subtitles.map(({ text, startTime, endTime }) => {
+    const drawtextFilters = fixedSubtitles.map(({ text, startTime, endTime }) => {
       const sanitized = sanitizeSubtitle(text);
       const escaped = escapeDrawtext(sanitized);
       return "drawtext=fontfile='" + fontPath + "':text='" + escaped + "':fontsize=60:fontcolor=white:shadowcolor=black@0.9:shadowx=3:shadowy=3:borderw=2:bordercolor=black@0.6:x=(w-tw)/2:y=h*0.78:enable='between(t," + startTime + "," + endTime + ")'";
     }).join(',');
 
-    // Step 7: Build hook video with FFmpeg
-    const hookVideoPath = path.join(workDir, 'hook.mp4');
-    const fadeDuration = 2;
-    const fadeStart = duration - fadeDuration;
-
-    // Heartbeat asset path
+    // Heartbeat asset
     const heartbeatPath = path.join(__dirname, 'assets', 'heartbeat.mp3');
     const hasHeartbeat = require('fs').existsSync(heartbeatPath);
     console.log('[hook] heartbeat asset:', hasHeartbeat ? heartbeatPath : 'NOT FOUND (skipping)');
 
-    await new Promise((resolve, reject) => {
-      const { spawn } = require('child_process');
+    const hookVideoPath = path.join(workDir, 'hook.mp4');
 
-      let filterComplex;
-      let mapArgs;
-      let inputArgs;
+    // ── 3-expression cinematic mode (when 3 distinct photos provided) ─────────
+    const useThreeExpressions = resolvedPhotoUrls.length >= 3 &&
+      resolvedPhotoUrls[0] !== resolvedPhotoUrls[1]; // only if truly distinct
 
-      if (usedParallax) {
-        // ── Enhanced parallax mode: blurred bg + fg overlay + Ken Burns + heartbeat ──
-        // Inputs: 0=bg_blur, 1=fg, 2=concatAudio, 3=heartbeat(opt), 4=bgm(opt)
-        let inputIdx = 2;
-        const audioIdx = inputIdx++;
-        const heartbeatIdx = hasHeartbeat ? inputIdx++ : null;
-        const bgmIdx = bgmPath ? inputIdx++ : null;
+    if (useThreeExpressions) {
+      console.log('[hook] 3-expression mode: building 3 segments');
 
-        // Video filter chain
-        const bgFilter = "[0:v]zoompan=z='min(zoom+0.0006,1.15)':d=375:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1080x1920[bgz]";
-        const fgFilter = '[1:v]scale=820:-1[fg]';
-        const overlayFilter = "[bgz][fg]overlay=x='(W-w)/2+8*sin(t*0.7)':y='(H-h)/2-10*cos(t*0.5)'[comp]";
+      // Build 3 silent video segments
+      const seg1Path = path.join(workDir, 'seg1.mp4');
+      const seg2Path = path.join(workDir, 'seg2.mp4');
+      const seg3Path = path.join(workDir, 'seg3.mp4');
+      const videoRawPath = path.join(workDir, 'video_raw.mp4');
 
-        // Subtitle drawtext + flash at t=12 + fade
-        const subtitleFlashFade = [
-          drawtextFilters,
-          "eq=brightness='if(between(t,12,12.2),0.1,0)'",
-          'fade=t=in:st=0:d=1',
-          'fade=t=out:st=' + fadeStart + ':d=' + fadeDuration,
-          'format=yuv420p',
-        ].filter(Boolean).join(',');
+      const spawnFfmpeg = (args) => new Promise((resolve, reject) => {
+        const { spawn } = require('child_process');
+        const proc = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+        let stderr = '';
+        proc.stderr.on('data', (d) => { stderr += d.toString(); });
+        proc.on('close', (code) => {
+          if (code === 0) resolve();
+          else reject(new Error('ffmpeg exit ' + code + ': ' + stderr.slice(-400)));
+        });
+      });
 
-        const finalVFilter = '[comp]' + subtitleFlashFade + '[vout]';
+      // Segment 1: calm (0-4s) — slow push
+      await spawnFfmpeg([
+        '-y', '-loop', '1', '-i', photoPaths[0], '-t', '4',
+        '-vf', 'scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,' +
+               "zoompan=z='min(zoom+0.0005,1.1)':d=100:s=1080x1920,format=yuv420p",
+        '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-r', '25', seg1Path,
+      ]);
+      console.log('[hook] seg1 done');
 
-        // Audio mix: voice + heartbeat (looped) + bgm
-        const audioFilters = [];
-        audioFilters.push('[' + audioIdx + ':a]volume=1.2[a1]');
-        if (heartbeatIdx !== null) {
-          audioFilters.push('[' + heartbeatIdx + ':a]volume=0.3,aloop=loop=10:size=2000000000[a2]');
-        }
-        if (bgmIdx !== null) {
-          audioFilters.push('[' + bgmIdx + ':a]volume=0.15[a3]');
-        }
+      // Segment 2: surprised (4-9s) — slight color boost
+      await spawnFfmpeg([
+        '-y', '-loop', '1', '-i', photoPaths[1], '-t', '5',
+        '-vf', 'scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,' +
+               'hue=s=1.2,eq=contrast=1.2,format=yuv420p',
+        '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-r', '25', seg2Path,
+      ]);
+      console.log('[hook] seg2 done');
 
-        const audioInputLabels = ['[a1]', heartbeatIdx !== null ? '[a2]' : null, bgmIdx !== null ? '[a3]' : null].filter(Boolean);
-        const amixInputs = audioInputLabels.length;
-        audioFilters.push(audioInputLabels.join('') + 'amix=inputs=' + amixInputs + ':duration=first[aout]');
+      // Segment 3: fearful (9-15s) — fast push + vignette
+      await spawnFfmpeg([
+        '-y', '-loop', '1', '-i', photoPaths[2], '-t', '6',
+        '-vf', 'scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,' +
+               "zoompan=z='min(zoom+0.0015,1.3)':d=150:s=1080x1920,vignette,format=yuv420p",
+        '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-r', '25', seg3Path,
+      ]);
+      console.log('[hook] seg3 done');
 
-        filterComplex = [bgFilter, fgFilter, overlayFilter, finalVFilter, ...audioFilters].join(';');
-        mapArgs = ['-map', '[vout]', '-map', '[aout]'];
+      // Concat 3 segments
+      await spawnFfmpeg([
+        '-y',
+        '-i', seg1Path, '-i', seg2Path, '-i', seg3Path,
+        '-filter_complex', '[0:v][1:v][2:v]concat=n=3:v=1[out]',
+        '-map', '[out]',
+        '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-r', '25',
+        videoRawPath,
+      ]);
+      console.log('[hook] segments concatenated');
 
-        inputArgs = [
-          '-loop', '1', '-i', bgBlurPath,
-          '-loop', '1', '-i', fgPath,
-          '-i', concatAudioPath,
-          ...(hasHeartbeat ? ['-i', heartbeatPath] : []),
-          ...(bgmPath ? ['-i', bgmPath] : []),
-        ];
-      } else {
-        // ── Fallback: single-layer cinematic oil painting ────────────────────
-        const cinematicFilter = [
-          'scale=1080:1920:force_original_aspect_ratio=decrease',
-          'pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black',
-          'smartblur=5:0.8:0,unsharp=5:5:1.5:5:5:0',
-          'colorchannelmixer=rr=1.1:gg=0.95:bb=0.85,eq=contrast=1.4:brightness=-0.05:saturation=1.3:gamma=0.9',
-          'noise=alls=8:allf=t',
-          'vignette=PI/3',
-          "zoompan=z='min(zoom+0.0008,1.08)':d=450:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1080x1920",
-          'fade=t=in:st=0:d=1',
-          'fade=t=out:st=' + fadeStart + ':d=' + fadeDuration,
-          drawtextFilters,
-          'format=yuv420p',
-        ].filter(Boolean).join(',');
+      // Add subtitles via drawtext
+      const videoSubPath = path.join(workDir, 'video_sub.mp4');
+      await spawnFfmpeg([
+        '-y', '-i', videoRawPath,
+        '-vf', drawtextFilters,
+        '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23',
+        '-c:a', 'copy',
+        videoSubPath,
+      ]);
+      console.log('[hook] subtitles added');
 
-        let inputIdx = 1;
-        const audioIdx = inputIdx++;
-        const heartbeatIdx = hasHeartbeat ? inputIdx++ : null;
-        const bgmIdx = bgmPath ? inputIdx++ : null;
+      // Add audio: voice + BGM + heartbeat
+      const audioFilters = [];
+      let audioInputIdx = 1;
+      const voiceIdx = audioInputIdx++;
+      const heartbeatIdx2 = hasHeartbeat ? audioInputIdx++ : null;
+      const bgmIdx2 = bgmPath ? audioInputIdx++ : null;
 
-        const audioFilters = [];
-        audioFilters.push('[' + audioIdx + ':a]volume=1.2[a1]');
-        if (heartbeatIdx !== null) {
-          audioFilters.push('[' + heartbeatIdx + ':a]volume=0.3,aloop=loop=10:size=2000000000[a2]');
-        }
-        if (bgmIdx !== null) {
-          audioFilters.push('[' + bgmIdx + ':a]volume=0.15[a3]');
-        }
-        const audioInputLabels = ['[a1]', heartbeatIdx !== null ? '[a2]' : null, bgmIdx !== null ? '[a3]' : null].filter(Boolean);
-        const amixInputs = audioInputLabels.length;
-        audioFilters.push(audioInputLabels.join('') + 'amix=inputs=' + amixInputs + ':duration=first[aout]');
+      audioFilters.push('[' + voiceIdx + ':a]volume=1.2[a1]');
+      if (heartbeatIdx2 !== null) audioFilters.push('[' + heartbeatIdx2 + ':a]volume=0.3,aloop=loop=10:size=2000000000[a2]');
+      if (bgmIdx2 !== null) audioFilters.push('[' + bgmIdx2 + ':a]volume=0.15[a3]');
 
-        filterComplex = '[0:v]' + cinematicFilter + '[vout];' + audioFilters.join(';');
-        mapArgs = ['-map', '[vout]', '-map', '[aout]'];
+      const audioLabels = ['[a1]', heartbeatIdx2 !== null ? '[a2]' : null, bgmIdx2 !== null ? '[a3]' : null].filter(Boolean);
+      audioFilters.push(audioLabels.join('') + 'amix=inputs=' + audioLabels.length + ':duration=first[aout]');
 
-        inputArgs = [
+      await spawnFfmpeg([
+        '-y',
+        '-i', videoSubPath,
+        '-i', concatAudioPath,
+        ...(hasHeartbeat ? ['-i', heartbeatPath] : []),
+        ...(bgmPath ? ['-i', bgmPath] : []),
+        '-filter_complex', audioFilters.join(';'),
+        '-map', '0:v',
+        '-map', '[aout]',
+        '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23',
+        '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2',
+        '-t', String(duration),
+        '-shortest',
+        hookVideoPath,
+      ]);
+      console.log('[hook] 3-expression video complete');
+
+    } else {
+      // ── Single-photo fallback: cinematic oil painting ─────────────────────
+      console.log('[hook] single-photo mode (fallback)');
+      const fadeDuration = 2;
+      const fadeStart = duration - fadeDuration;
+
+      const cinematicFilter = [
+        'scale=1080:1920:force_original_aspect_ratio=decrease',
+        'pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black',
+        'smartblur=5:0.8:0,unsharp=5:5:1.5:5:5:0',
+        'colorchannelmixer=rr=1.1:gg=0.95:bb=0.85,eq=contrast=1.4:brightness=-0.05:saturation=1.3:gamma=0.9',
+        'noise=alls=8:allf=t',
+        'vignette=PI/3',
+        "zoompan=z='min(zoom+0.0008,1.08)':d=450:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1080x1920",
+        'fade=t=in:st=0:d=1',
+        'fade=t=out:st=' + fadeStart + ':d=' + fadeDuration,
+        drawtextFilters,
+        'format=yuv420p',
+      ].filter(Boolean).join(',');
+
+      let inputIdx = 1;
+      const audioIdx = inputIdx++;
+      const heartbeatIdx = hasHeartbeat ? inputIdx++ : null;
+      const bgmIdx = bgmPath ? inputIdx++ : null;
+
+      const audioFilters = [];
+      audioFilters.push('[' + audioIdx + ':a]volume=1.2[a1]');
+      if (heartbeatIdx !== null) audioFilters.push('[' + heartbeatIdx + ':a]volume=0.3,aloop=loop=10:size=2000000000[a2]');
+      if (bgmIdx !== null) audioFilters.push('[' + bgmIdx + ':a]volume=0.15[a3]');
+      const audioLabels = ['[a1]', heartbeatIdx !== null ? '[a2]' : null, bgmIdx !== null ? '[a3]' : null].filter(Boolean);
+      audioFilters.push(audioLabels.join('') + 'amix=inputs=' + audioLabels.length + ':duration=first[aout]');
+
+      const filterComplex = '[0:v]' + cinematicFilter + '[vout];' + audioFilters.join(';');
+
+      await new Promise((resolve, reject) => {
+        const { spawn } = require('child_process');
+        const args = [
           '-loop', '1', '-i', photoPath,
           '-i', concatAudioPath,
           ...(hasHeartbeat ? ['-i', heartbeatPath] : []),
           ...(bgmPath ? ['-i', bgmPath] : []),
+          '-filter_complex', filterComplex,
+          '-map', '[vout]', '-map', '[aout]',
+          '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p',
+          '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2',
+          '-t', String(duration), '-r', '25', '-shortest', '-y',
+          hookVideoPath,
         ];
-      }
-
-      const args = [
-        ...inputArgs,
-        '-filter_complex', filterComplex,
-        ...mapArgs,
-        '-c:v', 'libx264',
-        '-preset', 'veryfast',
-        '-crf', '23',
-        '-pix_fmt', 'yuv420p',
-        '-c:a', 'aac',
-        '-b:a', '192k',
-        '-ar', '48000',
-        '-ac', '2',
-        '-t', String(duration),
-        '-r', '25',
-        '-shortest',
-        '-y',
-        hookVideoPath,
-      ];
-
-      console.log('[hook] ffmpeg args:', args.join(' '));
-      const proc = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] });
-      let stderr = '';
-      proc.stderr.on('data', (d) => { stderr += d.toString(); });
-      proc.on('close', (code) => {
-        if (code === 0) resolve();
-        else reject(new Error('hook ffmpeg exit ' + code + ': ' + stderr.slice(-500)));
+        console.log('[hook] ffmpeg args:', args.join(' '));
+        const proc = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+        let stderr = '';
+        proc.stderr.on('data', (d) => { stderr += d.toString(); });
+        proc.on('close', (code) => {
+          if (code === 0) resolve();
+          else reject(new Error('hook ffmpeg exit ' + code + ': ' + stderr.slice(-500)));
+        });
       });
-    });
+    }
 
     console.log('[hook] video built');
 
