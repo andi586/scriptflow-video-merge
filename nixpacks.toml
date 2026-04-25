@@ -17,4 +17,4 @@ cmds = [
 ]
 
 [start]
-cmd = "node server.js"
+cmd = "sh scripts/gen_heartbeat.sh && node server.js"

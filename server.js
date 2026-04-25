@@ -1137,12 +1137,12 @@ app.post('/hook', async (req, res) => {
     // Step 5: Remove background with rembg → fg.png
     const fgPath = path.join(workDir, 'fg.png');
     const bgBlurPath = path.join(workDir, 'bg_blur.jpg');
+    const zoomVideoPath = path.join(workDir, 'zoom.mp4');
     let usedParallax = false;
 
     try {
       await new Promise((resolve, reject) => {
         const { spawn } = require('child_process');
-        // Resolve script path relative to server.js location
         const scriptPath = path.join(__dirname, 'scripts', 'remove_bg.py');
         const proc = spawn('python3', [scriptPath, photoPath, fgPath], { stdio: ['ignore', 'pipe', 'pipe'] });
         let stderr = '';
@@ -1159,7 +1159,7 @@ app.post('/hook', async (req, res) => {
         const { spawn } = require('child_process');
         const args = [
           '-i', photoPath,
-          '-vf', 'scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=20:1',
+          '-vf', 'scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=15:1',
           '-y', bgBlurPath,
         ];
         const proc = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] });
@@ -1178,11 +1178,10 @@ app.post('/hook', async (req, res) => {
 
     // Step 6: Build subtitle drawtext filters from subtitles array
     // subtitles: [{ text, startTime, endTime }]
-    const fontPath = getFontForLanguage('zh'); // default CJK-capable font
+    const fontPath = DEJAVU_FONT; // use DejaVu for reliability
     const drawtextFilters = subtitles.map(({ text, startTime, endTime }) => {
       const sanitized = sanitizeSubtitle(text);
       const escaped = escapeDrawtext(sanitized);
-      // Large cinematic white text, bottom third, strong drop shadow
       return "drawtext=fontfile='" + fontPath + "':text='" + escaped + "':fontsize=60:fontcolor=white:shadowcolor=black@0.9:shadowx=3:shadowy=3:borderw=2:bordercolor=black@0.6:x=(w-tw)/2:y=h*0.78:enable='between(t," + startTime + "," + endTime + ")'";
     }).join(',');
 
@@ -1190,6 +1189,11 @@ app.post('/hook', async (req, res) => {
     const hookVideoPath = path.join(workDir, 'hook.mp4');
     const fadeDuration = 2;
     const fadeStart = duration - fadeDuration;
+
+    // Heartbeat asset path
+    const heartbeatPath = path.join(__dirname, 'assets', 'heartbeat.mp3');
+    const hasHeartbeat = require('fs').existsSync(heartbeatPath);
+    console.log('[hook] heartbeat asset:', hasHeartbeat ? heartbeatPath : 'NOT FOUND (skipping)');
 
     await new Promise((resolve, reject) => {
       const { spawn } = require('child_process');
@@ -1199,50 +1203,51 @@ app.post('/hook', async (req, res) => {
       let inputArgs;
 
       if (usedParallax) {
-        // ── Parallax mode: blurred bg + foreground overlay + Ken Burns ──────
-        // Input 0: bg_blur.jpg (background)
-        // Input 1: fg.png (foreground, transparent)
-        // Input 2: concatAudioPath
-        // Input 3: bgmPath (optional)
-        const audioInputIdx = 2;
-        const bgmInputIdx = bgmPath ? 3 : null;
+        // ── Enhanced parallax mode: blurred bg + fg overlay + Ken Burns + heartbeat ──
+        // Inputs: 0=bg_blur, 1=fg, 2=concatAudio, 3=heartbeat(opt), 4=bgm(opt)
+        let inputIdx = 2;
+        const audioIdx = inputIdx++;
+        const heartbeatIdx = hasHeartbeat ? inputIdx++ : null;
+        const bgmIdx = bgmPath ? inputIdx++ : null;
 
-        const subtitleAndFade = [
+        // Video filter chain
+        const bgFilter = "[0:v]zoompan=z='min(zoom+0.0006,1.15)':d=375:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1080x1920[bgz]";
+        const fgFilter = '[1:v]scale=820:-1[fg]';
+        const overlayFilter = "[bgz][fg]overlay=x='(W-w)/2+8*sin(t*0.7)':y='(H-h)/2-10*cos(t*0.5)'[comp]";
+
+        // Subtitle drawtext + flash at t=12 + fade
+        const subtitleFlashFade = [
+          drawtextFilters,
+          "eq=brightness='if(between(t,12,12.2),0.1,0)'",
           'fade=t=in:st=0:d=1',
           'fade=t=out:st=' + fadeStart + ':d=' + fadeDuration,
-          drawtextFilters,
+          'format=yuv420p',
         ].filter(Boolean).join(',');
 
-        const bgFilter = "[0:v]zoompan=z='min(zoom+0.0005,1.1)':d=375:s=1080x1920[bg]";
-        const fgFilter = '[1:v]scale=800:-1[fg]';
-        const overlayFilter = "[bg][fg]overlay=x='(W-w)/2+10*sin(t*0.5)':y='(H-h)/2'[overlaid]";
-        const finalVFilter = '[overlaid]' + subtitleAndFade + '[vout]';
+        const finalVFilter = '[comp]' + subtitleFlashFade + '[vout]';
 
-        if (bgmInputIdx !== null) {
-          filterComplex = [
-            bgFilter,
-            fgFilter,
-            overlayFilter,
-            finalVFilter,
-            '[' + audioInputIdx + ':a]volume=1.0[dialogue]',
-            '[' + bgmInputIdx + ':a]volume=0.12,aloop=loop=-1:size=2147483647[bgm]',
-            '[dialogue][bgm]amix=inputs=2:duration=first[aout]',
-          ].join(';');
-          mapArgs = ['-map', '[vout]', '-map', '[aout]'];
-        } else {
-          filterComplex = [
-            bgFilter,
-            fgFilter,
-            overlayFilter,
-            finalVFilter,
-          ].join(';');
-          mapArgs = ['-map', '[vout]', '-map', audioInputIdx + ':a'];
+        // Audio mix: voice + heartbeat (looped) + bgm
+        const audioFilters = [];
+        audioFilters.push('[' + audioIdx + ':a]volume=1.2[a1]');
+        if (heartbeatIdx !== null) {
+          audioFilters.push('[' + heartbeatIdx + ':a]volume=0.3,aloop=loop=10:size=2000000000[a2]');
         }
+        if (bgmIdx !== null) {
+          audioFilters.push('[' + bgmIdx + ':a]volume=0.15[a3]');
+        }
+
+        const audioInputLabels = ['[a1]', heartbeatIdx !== null ? '[a2]' : null, bgmIdx !== null ? '[a3]' : null].filter(Boolean);
+        const amixInputs = audioInputLabels.length;
+        audioFilters.push(audioInputLabels.join('') + 'amix=inputs=' + amixInputs + ':duration=first[aout]');
+
+        filterComplex = [bgFilter, fgFilter, overlayFilter, finalVFilter, ...audioFilters].join(';');
+        mapArgs = ['-map', '[vout]', '-map', '[aout]'];
 
         inputArgs = [
           '-loop', '1', '-i', bgBlurPath,
           '-loop', '1', '-i', fgPath,
           '-i', concatAudioPath,
+          ...(hasHeartbeat ? ['-i', heartbeatPath] : []),
           ...(bgmPath ? ['-i', bgmPath] : []),
         ];
       } else {
@@ -1258,23 +1263,33 @@ app.post('/hook', async (req, res) => {
           'fade=t=in:st=0:d=1',
           'fade=t=out:st=' + fadeStart + ':d=' + fadeDuration,
           drawtextFilters,
+          'format=yuv420p',
         ].filter(Boolean).join(',');
 
-        if (bgmPath) {
-          filterComplex =
-            '[0:v]' + cinematicFilter + '[vout];' +
-            '[1:a]volume=1.0[dialogue];' +
-            '[2:a]volume=0.12,aloop=loop=-1:size=2147483647[bgm];' +
-            '[dialogue][bgm]amix=inputs=2:duration=first[aout]';
-          mapArgs = ['-map', '[vout]', '-map', '[aout]'];
-        } else {
-          filterComplex = '[0:v]' + cinematicFilter + '[vout]';
-          mapArgs = ['-map', '[vout]', '-map', '1:a'];
+        let inputIdx = 1;
+        const audioIdx = inputIdx++;
+        const heartbeatIdx = hasHeartbeat ? inputIdx++ : null;
+        const bgmIdx = bgmPath ? inputIdx++ : null;
+
+        const audioFilters = [];
+        audioFilters.push('[' + audioIdx + ':a]volume=1.2[a1]');
+        if (heartbeatIdx !== null) {
+          audioFilters.push('[' + heartbeatIdx + ':a]volume=0.3,aloop=loop=10:size=2000000000[a2]');
         }
+        if (bgmIdx !== null) {
+          audioFilters.push('[' + bgmIdx + ':a]volume=0.15[a3]');
+        }
+        const audioInputLabels = ['[a1]', heartbeatIdx !== null ? '[a2]' : null, bgmIdx !== null ? '[a3]' : null].filter(Boolean);
+        const amixInputs = audioInputLabels.length;
+        audioFilters.push(audioInputLabels.join('') + 'amix=inputs=' + amixInputs + ':duration=first[aout]');
+
+        filterComplex = '[0:v]' + cinematicFilter + '[vout];' + audioFilters.join(';');
+        mapArgs = ['-map', '[vout]', '-map', '[aout]'];
 
         inputArgs = [
           '-loop', '1', '-i', photoPath,
           '-i', concatAudioPath,
+          ...(hasHeartbeat ? ['-i', heartbeatPath] : []),
           ...(bgmPath ? ['-i', bgmPath] : []),
         ];
       }
@@ -1292,6 +1307,7 @@ app.post('/hook', async (req, res) => {
         '-ar', '48000',
         '-ac', '2',
         '-t', String(duration),
+        '-r', '25',
         '-shortest',
         '-y',
         hookVideoPath,
