@@ -1067,21 +1067,35 @@ app.post('/hook', async (req, res) => {
   const requestId = crypto.randomUUID();
   let workDir = null;
   try {
-    const { photoUrl, audioUrls, subtitles, bgmUrl, duration = 15, projectId } = req.body || {};
+    const { photoUrl, photoUrls, audioUrls, subtitles, bgmUrl, duration = 15, projectId } = req.body || {};
 
-    if (!photoUrl) return res.status(400).json({ success: false, error: 'photoUrl is required' });
+    // Accept either photoUrls (array of 3) or legacy photoUrl (single)
+    const resolvedPhotoUrls = Array.isArray(photoUrls) && photoUrls.length > 0
+      ? photoUrls
+      : photoUrl ? [photoUrl, photoUrl, photoUrl] : null;
+
+    if (!resolvedPhotoUrls) return res.status(400).json({ success: false, error: 'photoUrl or photoUrls is required' });
     if (!Array.isArray(audioUrls) || audioUrls.length === 0) return res.status(400).json({ success: false, error: 'audioUrls is required' });
     if (!Array.isArray(subtitles) || subtitles.length === 0) return res.status(400).json({ success: false, error: 'subtitles is required' });
 
     workDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hook-'));
     console.log('[hook][' + requestId + '] workDir:', workDir);
+    console.log('[hook] photoUrls:', resolvedPhotoUrls);
 
-    // Step 1: Download photo
-    const photoPath = path.join(workDir, 'photo.jpg');
-    const photoRes = await fetch(photoUrl);
-    if (!photoRes.ok) throw new Error('Photo download failed: ' + photoUrl);
-    await fsp.writeFile(photoPath, Buffer.from(await photoRes.arrayBuffer()));
-    console.log('[hook] photo downloaded');
+    // Step 1: Download photos (up to 3 expression variants)
+    // Photo 0 (calm): 0-5s, Photo 1 (surprised): 5-10s, Photo 2 (fearful): 10-15s
+    const photoPaths = [];
+    for (let i = 0; i < resolvedPhotoUrls.length; i++) {
+      const pp = path.join(workDir, 'photo_' + i + '.jpg');
+      const pr = await fetch(resolvedPhotoUrls[i]);
+      if (!pr.ok) throw new Error('Photo ' + i + ' download failed: ' + resolvedPhotoUrls[i]);
+      await fsp.writeFile(pp, Buffer.from(await pr.arrayBuffer()));
+      photoPaths.push(pp);
+    }
+    // Ensure we always have 3 photos (pad with first if fewer)
+    while (photoPaths.length < 3) photoPaths.push(photoPaths[0]);
+    const photoPath = photoPaths[0]; // primary photo for rembg fallback
+    console.log('[hook] photos downloaded:', photoPaths.length);
 
     // Step 2: Download audio files
     const audioPaths = [];
