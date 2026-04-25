@@ -1134,7 +1134,49 @@ app.post('/hook', async (req, res) => {
       }
     }
 
-    // Step 5: Build subtitle drawtext filters from subtitles array
+    // Step 5: Remove background with rembg → fg.png
+    const fgPath = path.join(workDir, 'fg.png');
+    const bgBlurPath = path.join(workDir, 'bg_blur.jpg');
+    let usedParallax = false;
+
+    try {
+      await new Promise((resolve, reject) => {
+        const { spawn } = require('child_process');
+        // Resolve script path relative to server.js location
+        const scriptPath = path.join(__dirname, 'scripts', 'remove_bg.py');
+        const proc = spawn('python3', [scriptPath, photoPath, fgPath], { stdio: ['ignore', 'pipe', 'pipe'] });
+        let stderr = '';
+        proc.stderr.on('data', (d) => { stderr += d.toString(); });
+        proc.on('close', (code) => {
+          if (code === 0) resolve();
+          else reject(new Error('rembg exit ' + code + ': ' + stderr.slice(-300)));
+        });
+      });
+      console.log('[hook] rembg: foreground extracted');
+
+      // Create blurred background from original photo
+      await new Promise((resolve, reject) => {
+        const { spawn } = require('child_process');
+        const args = [
+          '-i', photoPath,
+          '-vf', 'scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=20:1',
+          '-y', bgBlurPath,
+        ];
+        const proc = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+        let stderr = '';
+        proc.stderr.on('data', (d) => { stderr += d.toString(); });
+        proc.on('close', (code) => {
+          if (code === 0) resolve();
+          else reject(new Error('bg blur ffmpeg exit ' + code + ': ' + stderr.slice(-300)));
+        });
+      });
+      console.log('[hook] blurred background created');
+      usedParallax = true;
+    } catch (rembgErr) {
+      console.warn('[hook] rembg failed (falling back to single-layer mode):', rembgErr.message);
+    }
+
+    // Step 6: Build subtitle drawtext filters from subtitles array
     // subtitles: [{ text, startTime, endTime }]
     const fontPath = getFontForLanguage('zh'); // default CJK-capable font
     const drawtextFilters = subtitles.map(({ text, startTime, endTime }) => {
@@ -1144,8 +1186,7 @@ app.post('/hook', async (req, res) => {
       return "drawtext=fontfile='" + fontPath + "':text='" + escaped + "':fontsize=60:fontcolor=white:shadowcolor=black@0.9:shadowx=3:shadowy=3:borderw=2:bordercolor=black@0.6:x=(w-tw)/2:y=h*0.78:enable='between(t," + startTime + "," + endTime + ")'";
     }).join(',');
 
-    // Step 6: Build hook video with FFmpeg — cinematic oil painting effect
-    // Photo → Ken Burns zoom + oil painting + color grade + grain + vignette + subtitles + BGM
+    // Step 7: Build hook video with FFmpeg
     const hookVideoPath = path.join(workDir, 'hook.mp4');
     const fadeDuration = 2;
     const fadeStart = duration - fadeDuration;
@@ -1153,48 +1194,93 @@ app.post('/hook', async (req, res) => {
     await new Promise((resolve, reject) => {
       const { spawn } = require('child_process');
 
-      // ── Cinematic oil painting filter chain ──────────────────────────────
-      // 1. Scale to 9:16 with padding
-      // 2. Oil painting: smartblur + unsharp
-      // 3. Color grade: dramatic cinematic (warm shadows, high contrast)
-      // 4. Film grain texture
-      // 5. Strong vignette
-      // 6. Ken Burns slow zoom (zoompan — must come AFTER all pixel filters)
-      // 7. Fade in 1s + fade out 2s
-      // 8. Subtitles (drawtext)
-      const cinematicFilter = [
-        'scale=1080:1920:force_original_aspect_ratio=decrease',
-        'pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black',
-        'smartblur=5:0.8:0,unsharp=5:5:1.5:5:5:0',
-        'colorchannelmixer=rr=1.1:gg=0.95:bb=0.85,eq=contrast=1.4:brightness=-0.05:saturation=1.3:gamma=0.9',
-        'noise=alls=8:allf=t',
-        'vignette=PI/3',
-        "zoompan=z='min(zoom+0.0008,1.08)':d=450:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1080x1920",
-        'fade=t=in:st=0:d=1',
-        'fade=t=out:st=' + fadeStart + ':d=' + fadeDuration,
-        drawtextFilters,
-      ].filter(Boolean).join(',');
-
-      // Build filter_complex
       let filterComplex;
       let mapArgs;
+      let inputArgs;
 
-      if (bgmPath) {
-        filterComplex =
-          '[0:v]' + cinematicFilter + '[vout];' +
-          '[1:a]volume=1.0[dialogue];' +
-          '[2:a]volume=0.12,aloop=loop=-1:size=2147483647[bgm];' +
-          '[dialogue][bgm]amix=inputs=2:duration=first[aout]';
-        mapArgs = ['-map', '[vout]', '-map', '[aout]'];
+      if (usedParallax) {
+        // ── Parallax mode: blurred bg + foreground overlay + Ken Burns ──────
+        // Input 0: bg_blur.jpg (background)
+        // Input 1: fg.png (foreground, transparent)
+        // Input 2: concatAudioPath
+        // Input 3: bgmPath (optional)
+        const audioInputIdx = 2;
+        const bgmInputIdx = bgmPath ? 3 : null;
+
+        const subtitleAndFade = [
+          'fade=t=in:st=0:d=1',
+          'fade=t=out:st=' + fadeStart + ':d=' + fadeDuration,
+          drawtextFilters,
+        ].filter(Boolean).join(',');
+
+        const bgFilter = "[0:v]zoompan=z='min(zoom+0.0005,1.1)':d=375:s=1080x1920[bg]";
+        const fgFilter = '[1:v]scale=800:-1[fg]';
+        const overlayFilter = "[bg][fg]overlay=x='(W-w)/2+10*sin(t*0.5)':y='(H-h)/2'[overlaid]";
+        const finalVFilter = '[overlaid]' + subtitleAndFade + '[vout]';
+
+        if (bgmInputIdx !== null) {
+          filterComplex = [
+            bgFilter,
+            fgFilter,
+            overlayFilter,
+            finalVFilter,
+            '[' + audioInputIdx + ':a]volume=1.0[dialogue]',
+            '[' + bgmInputIdx + ':a]volume=0.12,aloop=loop=-1:size=2147483647[bgm]',
+            '[dialogue][bgm]amix=inputs=2:duration=first[aout]',
+          ].join(';');
+          mapArgs = ['-map', '[vout]', '-map', '[aout]'];
+        } else {
+          filterComplex = [
+            bgFilter,
+            fgFilter,
+            overlayFilter,
+            finalVFilter,
+          ].join(';');
+          mapArgs = ['-map', '[vout]', '-map', audioInputIdx + ':a'];
+        }
+
+        inputArgs = [
+          '-loop', '1', '-i', bgBlurPath,
+          '-loop', '1', '-i', fgPath,
+          '-i', concatAudioPath,
+          ...(bgmPath ? ['-i', bgmPath] : []),
+        ];
       } else {
-        filterComplex = '[0:v]' + cinematicFilter + '[vout]';
-        mapArgs = ['-map', '[vout]', '-map', '1:a'];
+        // ── Fallback: single-layer cinematic oil painting ────────────────────
+        const cinematicFilter = [
+          'scale=1080:1920:force_original_aspect_ratio=decrease',
+          'pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black',
+          'smartblur=5:0.8:0,unsharp=5:5:1.5:5:5:0',
+          'colorchannelmixer=rr=1.1:gg=0.95:bb=0.85,eq=contrast=1.4:brightness=-0.05:saturation=1.3:gamma=0.9',
+          'noise=alls=8:allf=t',
+          'vignette=PI/3',
+          "zoompan=z='min(zoom+0.0008,1.08)':d=450:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1080x1920",
+          'fade=t=in:st=0:d=1',
+          'fade=t=out:st=' + fadeStart + ':d=' + fadeDuration,
+          drawtextFilters,
+        ].filter(Boolean).join(',');
+
+        if (bgmPath) {
+          filterComplex =
+            '[0:v]' + cinematicFilter + '[vout];' +
+            '[1:a]volume=1.0[dialogue];' +
+            '[2:a]volume=0.12,aloop=loop=-1:size=2147483647[bgm];' +
+            '[dialogue][bgm]amix=inputs=2:duration=first[aout]';
+          mapArgs = ['-map', '[vout]', '-map', '[aout]'];
+        } else {
+          filterComplex = '[0:v]' + cinematicFilter + '[vout]';
+          mapArgs = ['-map', '[vout]', '-map', '1:a'];
+        }
+
+        inputArgs = [
+          '-loop', '1', '-i', photoPath,
+          '-i', concatAudioPath,
+          ...(bgmPath ? ['-i', bgmPath] : []),
+        ];
       }
 
       const args = [
-        '-loop', '1', '-i', photoPath,
-        '-i', concatAudioPath,
-        ...(bgmPath ? ['-i', bgmPath] : []),
+        ...inputArgs,
         '-filter_complex', filterComplex,
         ...mapArgs,
         '-c:v', 'libx264',

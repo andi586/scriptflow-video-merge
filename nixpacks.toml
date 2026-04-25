@@ -5,7 +5,15 @@ nixPkgs = [
   "fontconfig",
   "freetype",
   "harfbuzz",
-  "dejavu_fonts"
+  "dejavu_fonts",
+  "python3",
+  "python3Packages.pip"
+]
+
+[phases.install]
+cmds = [
+  "npm install",
+  "pip install rembg pillow"
 ]
 
 [start]
