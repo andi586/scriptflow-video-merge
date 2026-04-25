@@ -27,6 +27,17 @@ function escapeDrawtext(text) {
     .replace(/;/g, '\\;');
 }
 
+/** Sanitize subtitle text before passing to FFmpeg drawtext */
+function sanitizeSubtitle(text) {
+  return String(text || '')
+    .replace(/'/g, '')
+    .replace(/"/g, '')
+    .replace(/\\/g, '')
+    .replace(/:/g, ' ')
+    .replace(/[^\w\s\.,!?]/g, '')
+    .trim();
+}
+
 const DEJAVU_FONT = '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf';
 
 // ─── Multilingual font mapping ────────────────────────────────────────────────
@@ -1127,7 +1138,8 @@ app.post('/hook', async (req, res) => {
     // subtitles: [{ text, startTime, endTime }]
     const fontPath = getFontForLanguage('zh'); // default CJK-capable font
     const drawtextFilters = subtitles.map(({ text, startTime, endTime }) => {
-      const escaped = escapeDrawtext(text);
+      const sanitized = sanitizeSubtitle(text);
+      const escaped = escapeDrawtext(sanitized);
       return "drawtext=fontfile='" + fontPath + "':text='" + escaped + "':fontsize=48:fontcolor=white:borderw=3:bordercolor=black:x=(w-tw)/2:y=h*0.82:enable='between(t," + startTime + "," + endTime + ")'";
     }).join(',');
 
