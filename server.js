@@ -38,7 +38,7 @@ function sanitizeSubtitle(text) {
     .trim();
 }
 
-const DEJAVU_FONT = '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf';
+const DEJAVU_FONT = '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc';
 
 // ─── Multilingual font mapping ────────────────────────────────────────────────
 // Returns the best available font path for the given ISO 639-1 language code.
@@ -705,7 +705,7 @@ app.listen(PORT, () => {
   const fs = require('fs');
   const fontPaths = [
     '/app/assets/fonts/Inter-Regular.ttf',
-    '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf',
+    '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc',
     '/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf',
     '/usr/share/fonts/dejavu/DejaVuSans.ttf',
     '/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf',
@@ -1064,298 +1064,55 @@ app.post('/extract-frame', async (req, res) => {
 // Body: { photoUrl, audioUrls, subtitles, bgmUrl, duration, projectId }
 // Returns: { success, hookVideoUrl }
 app.post('/hook', async (req, res) => {
-  const requestId = crypto.randomUUID();
-  let workDir = null;
+  const { photoUrl, bgmUrl, subtitles, colorGrade } = req.body
+  
+  if (!photoUrl) return res.status(400).json({ success: false, error: 'photoUrl is required' })
+  
+  const id = require('uuid').v4()
+  const photoPath = `/tmp/${id}_photo.jpg`
+  const bgmPath = `/tmp/${id}_bgm.mp3`
+  const outputPath = `/tmp/${id}_hook.mp4`
+  
   try {
-    const { photoUrl, photoUrls, audioUrls, subtitles, bgmUrl, duration = 15, projectId } = req.body || {};
-
-    // Accept either photoUrls (array of 3) or legacy photoUrl (single)
-    const resolvedPhotoUrls = Array.isArray(photoUrls) && photoUrls.length > 0
-      ? photoUrls
-      : photoUrl ? [photoUrl, photoUrl, photoUrl] : null;
-
-    if (!resolvedPhotoUrls) return res.status(400).json({ success: false, error: 'photoUrl or photoUrls is required' });
-    if (!Array.isArray(audioUrls) || audioUrls.length === 0) return res.status(400).json({ success: false, error: 'audioUrls is required' });
-    if (!Array.isArray(subtitles) || subtitles.length === 0) return res.status(400).json({ success: false, error: 'subtitles is required' });
-
-    workDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hook-'));
-    console.log('[hook][' + requestId + '] workDir:', workDir);
-    console.log('[hook] photoUrls:', resolvedPhotoUrls);
-
-    // Step 1: Download photos (up to 3 expression variants)
-    // Photo 0 (calm): 0-5s, Photo 1 (surprised): 5-10s, Photo 2 (fearful): 10-15s
-    const photoPaths = [];
-    for (let i = 0; i < resolvedPhotoUrls.length; i++) {
-      const pp = path.join(workDir, 'photo_' + i + '.jpg');
-      const pr = await fetch(resolvedPhotoUrls[i]);
-      if (!pr.ok) throw new Error('Photo ' + i + ' download failed: ' + resolvedPhotoUrls[i]);
-      await fsp.writeFile(pp, Buffer.from(await pr.arrayBuffer()));
-      photoPaths.push(pp);
+    const photoRes = await fetch(photoUrl)
+    const photoBuffer = await photoRes.arrayBuffer()
+    fs.writeFileSync(photoPath, Buffer.from(photoBuffer))
+    
+    const bgmRes = await fetch(bgmUrl)
+    const bgmBuffer = await bgmRes.arrayBuffer()
+    fs.writeFileSync(bgmPath, Buffer.from(bgmBuffer))
+    
+    const line1 = (subtitles?.[0]?.text || 'This is you.').replace(/'/g, '').replace(/:/g, ' ')
+    const line2 = (subtitles?.[1]?.text || 'But something is wrong.').replace(/'/g, '').replace(/:/g, ' ')
+    const line3 = (subtitles?.[2]?.text || 'Watch your full movie.').replace(/'/g, '').replace(/:/g, ' ')
+    
+    const colorFilters = {
+      cold: 'eq=contrast=1.3:brightness=-0.08:saturation=0.8',
+      warm: 'eq=contrast=1.1:brightness=0.05:saturation=1.2',
+      epic: 'eq=contrast=1.5:brightness=-0.1:saturation=0.9',
+      cinematic: 'eq=contrast=1.2:brightness=-0.05:saturation=1.0'
     }
-    // Ensure we always have 3 photos (pad with first if fewer)
-    while (photoPaths.length < 3) photoPaths.push(photoPaths[0]);
-    const photoPath = photoPaths[0]; // primary photo for rembg fallback
-    console.log('[hook] photos downloaded:', photoPaths.length);
-
-    // Step 2: Download audio files
-    const audioPaths = [];
-    for (let i = 0; i < audioUrls.length; i++) {
-      const ap = path.join(workDir, 'audio_' + i + '.mp3');
-      const ar = await fetch(audioUrls[i]);
-      if (!ar.ok) throw new Error('Audio ' + i + ' download failed');
-      await fsp.writeFile(ap, Buffer.from(await ar.arrayBuffer()));
-      audioPaths.push(ap);
-    }
-    console.log('[hook] audio files downloaded:', audioPaths.length);
-
-    // Step 3: Concatenate audio files into one track
-    const concatAudioPath = path.join(workDir, 'audio_concat.mp3');
-    if (audioPaths.length === 1) {
-      await fsp.copyFile(audioPaths[0], concatAudioPath);
-    } else {
-      const audioListPath = path.join(workDir, 'alist.txt');
-      const audioListContent = audioPaths.map(p => "file '" + path.resolve(p).replace(/'/g, "'\\''") + "'").join('\n');
-      await fsp.writeFile(audioListPath, audioListContent, 'utf8');
-      await new Promise((resolve, reject) => {
-        const { spawn } = require('child_process');
-        const args = ['-f', 'concat', '-safe', '0', '-i', audioListPath, '-c', 'copy', '-y', concatAudioPath];
-        const proc = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] });
-        let stderr = '';
-        proc.stderr.on('data', (d) => { stderr += d.toString(); });
-        proc.on('close', (code) => {
-          if (code === 0) resolve();
-          else reject(new Error('audio concat ffmpeg exit ' + code + ': ' + stderr.slice(-300)));
-        });
-      });
-    }
-    console.log('[hook] audio concatenated');
-
-    // Step 4: Download BGM
-    let bgmPath = null;
-    if (bgmUrl) {
-      try {
-        bgmPath = path.join(workDir, 'bgm.mp3');
-        const bgmRes = await fetch(bgmUrl);
-        if (bgmRes.ok) {
-          await fsp.writeFile(bgmPath, Buffer.from(await bgmRes.arrayBuffer()));
-          console.log('[hook] BGM downloaded');
-        } else {
-          bgmPath = null;
-        }
-      } catch (bgmErr) {
-        console.warn('[hook] BGM download failed (skipping):', bgmErr.message);
-        bgmPath = null;
-      }
-    }
-
-    // Step 5: Build subtitle drawtext filters
-    const fontPath = DEJAVU_FONT;
-    // Use fixed timing for 3-segment video: line1=1-3s, line2=5-8s, line3=11-14s
-    const fixedSubtitles = subtitles.length >= 3
-      ? [
-          { text: subtitles[0].text, startTime: 1, endTime: 3 },
-          { text: subtitles[1].text, startTime: 5, endTime: 8 },
-          { text: subtitles[2].text, startTime: 11, endTime: 14 },
-        ]
-      : subtitles;
-
-    const drawtextFilters = fixedSubtitles.map(({ text, startTime, endTime }) => {
-      const sanitized = sanitizeSubtitle(text);
-      const escaped = escapeDrawtext(sanitized);
-      return "drawtext=fontfile='" + fontPath + "':text='" + escaped + "':fontsize=60:fontcolor=white:shadowcolor=black@0.9:shadowx=3:shadowy=3:borderw=2:bordercolor=black@0.6:x=(w-tw)/2:y=h*0.78:enable='between(t," + startTime + "," + endTime + ")'";
-    }).join(',');
-
-    // Heartbeat asset
-    const heartbeatPath = path.join(__dirname, 'assets', 'heartbeat.mp3');
-    const hasHeartbeat = require('fs').existsSync(heartbeatPath);
-    console.log('[hook] heartbeat asset:', hasHeartbeat ? heartbeatPath : 'NOT FOUND (skipping)');
-
-    const hookVideoPath = path.join(workDir, 'hook.mp4');
-
-    // ── 3-expression cinematic mode (when 3 distinct photos provided) ─────────
-    const useThreeExpressions = resolvedPhotoUrls.length >= 3 &&
-      resolvedPhotoUrls[0] !== resolvedPhotoUrls[1]; // only if truly distinct
-
-    if (useThreeExpressions) {
-      console.log('[hook] 3-expression mode: building 3 segments');
-
-      // Build 3 silent video segments
-      const seg1Path = path.join(workDir, 'seg1.mp4');
-      const seg2Path = path.join(workDir, 'seg2.mp4');
-      const seg3Path = path.join(workDir, 'seg3.mp4');
-      const videoRawPath = path.join(workDir, 'video_raw.mp4');
-
-      const spawnFfmpeg = (args) => new Promise((resolve, reject) => {
-        const { spawn } = require('child_process');
-        const proc = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] });
-        let stderr = '';
-        proc.stderr.on('data', (d) => { stderr += d.toString(); });
-        proc.on('close', (code) => {
-          if (code === 0) resolve();
-          else reject(new Error('ffmpeg exit ' + code + ': ' + stderr.slice(-400)));
-        });
-      });
-
-      // Segment 1: calm (0-4s) — slow push
-      await spawnFfmpeg([
-        '-y', '-loop', '1', '-i', photoPaths[0], '-t', '4',
-        '-vf', 'scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,' +
-               "zoompan=z='min(zoom+0.0005,1.1)':d=100:s=1080x1920,format=yuv420p",
-        '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-r', '25', seg1Path,
-      ]);
-      console.log('[hook] seg1 done');
-
-      // Segment 2: surprised (4-9s) — slight color boost
-      await spawnFfmpeg([
-        '-y', '-loop', '1', '-i', photoPaths[1], '-t', '5',
-        '-vf', 'scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,' +
-               'hue=s=1.2,eq=contrast=1.2,format=yuv420p',
-        '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-r', '25', seg2Path,
-      ]);
-      console.log('[hook] seg2 done');
-
-      // Segment 3: fearful (9-15s) — fast push + vignette
-      await spawnFfmpeg([
-        '-y', '-loop', '1', '-i', photoPaths[2], '-t', '6',
-        '-vf', 'scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,' +
-               "zoompan=z='min(zoom+0.0015,1.3)':d=150:s=1080x1920,vignette,format=yuv420p",
-        '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-r', '25', seg3Path,
-      ]);
-      console.log('[hook] seg3 done');
-
-      // Concat 3 segments
-      await spawnFfmpeg([
-        '-y',
-        '-i', seg1Path, '-i', seg2Path, '-i', seg3Path,
-        '-filter_complex', '[0:v][1:v][2:v]concat=n=3:v=1[out]',
-        '-map', '[out]',
-        '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-r', '25',
-        videoRawPath,
-      ]);
-      console.log('[hook] segments concatenated');
-
-      // Add subtitles via drawtext
-      const videoSubPath = path.join(workDir, 'video_sub.mp4');
-      await spawnFfmpeg([
-        '-y', '-i', videoRawPath,
-        '-vf', drawtextFilters,
-        '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23',
-        '-c:a', 'copy',
-        videoSubPath,
-      ]);
-      console.log('[hook] subtitles added');
-
-      // Add audio: voice + BGM + heartbeat
-      const audioFilters = [];
-      let audioInputIdx = 1;
-      const voiceIdx = audioInputIdx++;
-      const heartbeatIdx2 = hasHeartbeat ? audioInputIdx++ : null;
-      const bgmIdx2 = bgmPath ? audioInputIdx++ : null;
-
-      audioFilters.push('[' + voiceIdx + ':a]volume=1.2[a1]');
-      if (heartbeatIdx2 !== null) audioFilters.push('[' + heartbeatIdx2 + ':a]volume=0.3,aloop=loop=10:size=2000000000[a2]');
-      if (bgmIdx2 !== null) audioFilters.push('[' + bgmIdx2 + ':a]volume=0.15[a3]');
-
-      const audioLabels = ['[a1]', heartbeatIdx2 !== null ? '[a2]' : null, bgmIdx2 !== null ? '[a3]' : null].filter(Boolean);
-      audioFilters.push(audioLabels.join('') + 'amix=inputs=' + audioLabels.length + ':duration=first[aout]');
-
-      await spawnFfmpeg([
-        '-y',
-        '-i', videoSubPath,
-        '-i', concatAudioPath,
-        ...(hasHeartbeat ? ['-i', heartbeatPath] : []),
-        ...(bgmPath ? ['-i', bgmPath] : []),
-        '-filter_complex', audioFilters.join(';'),
-        '-map', '0:v',
-        '-map', '[aout]',
-        '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23',
-        '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2',
-        '-t', String(duration),
-        '-shortest',
-        hookVideoPath,
-      ]);
-      console.log('[hook] 3-expression video complete');
-
-    } else {
-      // ── Single-photo fallback: cinematic oil painting ─────────────────────
-      console.log('[hook] single-photo mode (fallback)');
-      const fadeDuration = 2;
-      const fadeStart = duration - fadeDuration;
-
-      const cinematicFilter = [
-        'scale=1080:1920:force_original_aspect_ratio=decrease',
-        'pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black',
-        'smartblur=5:0.8:0,unsharp=5:5:1.5:5:5:0',
-        'colorchannelmixer=rr=1.1:gg=0.95:bb=0.85,eq=contrast=1.4:brightness=-0.05:saturation=1.3:gamma=0.9',
-        'noise=alls=8:allf=t',
-        'vignette=PI/3',
-        "zoompan=z='min(zoom+0.0008,1.08)':d=450:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1080x1920",
-        'fade=t=in:st=0:d=1',
-        'fade=t=out:st=' + fadeStart + ':d=' + fadeDuration,
-        drawtextFilters,
-        'format=yuv420p',
-      ].filter(Boolean).join(',');
-
-      let inputIdx = 1;
-      const audioIdx = inputIdx++;
-      const heartbeatIdx = hasHeartbeat ? inputIdx++ : null;
-      const bgmIdx = bgmPath ? inputIdx++ : null;
-
-      const audioFilters = [];
-      audioFilters.push('[' + audioIdx + ':a]volume=1.2[a1]');
-      if (heartbeatIdx !== null) audioFilters.push('[' + heartbeatIdx + ':a]volume=0.3,aloop=loop=10:size=2000000000[a2]');
-      if (bgmIdx !== null) audioFilters.push('[' + bgmIdx + ':a]volume=0.15[a3]');
-      const audioLabels = ['[a1]', heartbeatIdx !== null ? '[a2]' : null, bgmIdx !== null ? '[a3]' : null].filter(Boolean);
-      audioFilters.push(audioLabels.join('') + 'amix=inputs=' + audioLabels.length + ':duration=first[aout]');
-
-      const filterComplex = '[0:v]' + cinematicFilter + '[vout];' + audioFilters.join(';');
-
-      await new Promise((resolve, reject) => {
-        const { spawn } = require('child_process');
-        const args = [
-          '-loop', '1', '-i', photoPath,
-          '-i', concatAudioPath,
-          ...(hasHeartbeat ? ['-i', heartbeatPath] : []),
-          ...(bgmPath ? ['-i', bgmPath] : []),
-          '-filter_complex', filterComplex,
-          '-map', '[vout]', '-map', '[aout]',
-          '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p',
-          '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2',
-          '-t', String(duration), '-r', '25', '-shortest', '-y',
-          hookVideoPath,
-        ];
-        console.log('[hook] ffmpeg args:', args.join(' '));
-        const proc = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] });
-        let stderr = '';
-        proc.stderr.on('data', (d) => { stderr += d.toString(); });
-        proc.on('close', (code) => {
-          if (code === 0) resolve();
-          else reject(new Error('hook ffmpeg exit ' + code + ': ' + stderr.slice(-500)));
-        });
-      });
-    }
-
-    console.log('[hook] video built');
-
-    // Step 7: Upload to Supabase
-    const hookBuf = await fsp.readFile(hookVideoPath);
-    const storagePath = 'hooks/' + (projectId || 'unknown') + '/hook_' + Date.now() + '.mp4';
-    const { error: uploadError } = await supabase.storage
-      .from('generated-videos')
-      .upload(storagePath, hookBuf, { contentType: 'video/mp4', upsert: true });
-
-    if (uploadError) throw new Error('Upload failed: ' + uploadError.message);
-
-    const { data: pub } = supabase.storage.from('generated-videos').getPublicUrl(storagePath);
-    const hookVideoUrl = pub.publicUrl;
-    console.log('[hook][' + requestId + '] done:', hookVideoUrl);
-
-    res.json({ success: true, hookVideoUrl });
+    const colorFilter = colorFilters[colorGrade] || colorFilters.cinematic
+    
+    const font = '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc'
+    
+    const { execSync } = require('child_process')
+    execSync(`ffmpeg -y -loop 1 -i "${photoPath}" -i "${bgmPath}" -filter_complex "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,scale=8000:-1,zoompan=z='min(zoom+0.0015,1.5)':d=200:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1080x1920,${colorFilter},vignette=PI/4,drawtext=fontfile=${font}:text='${line1}':fontcolor=white:fontsize=56:x=(w-text_w)/2:y=h*0.72:enable='between(t,0.5,2.5)',drawtext=fontfile=${font}:text='${line2}':fontcolor=white:fontsize=48:x=(w-text_w)/2:y=h*0.75:enable='between(t,3,5)',drawtext=fontfile=${font}:text='${line3}':fontcolor=white:fontsize=52:x=(w-text_w)/2:y=h*0.78:enable='between(t,5.5,7.5)',format=yuv420p[v];[1:a]volume=0.2[a]" -map "[v]" -map "[a]" -t 8 -r 25 -c:v libx264 -c:a aac "${outputPath}"`)
+    
+    const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY)
+    const fileBuffer = fs.readFileSync(outputPath)
+    const fileName = `hooks/hook_${Date.now()}.mp4`
+    await supabase.storage.from('generated-videos').upload(fileName, fileBuffer, { contentType: 'video/mp4', upsert: true })
+    const { data: urlData } = supabase.storage.from('generated-videos').getPublicUrl(fileName)
+    
+    fs.unlinkSync(photoPath)
+    fs.unlinkSync(bgmPath)
+    fs.unlinkSync(outputPath)
+    
+    res.json({ success: true, hookVideoUrl: urlData.publicUrl })
   } catch (err) {
-    console.error('[hook][' + requestId + '] ERROR:', err.message);
-    res.status(500).json({ success: false, error: err.message });
-  } finally {
-    if (workDir) await fsp.rm(workDir, { recursive: true, force: true }).catch(() => {});
+    console.error('[hook] error:', err.message)
+    res.status(500).json({ success: false, error: err.message })
   }
 });
 
