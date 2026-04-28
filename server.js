@@ -1064,6 +1064,7 @@ app.post('/extract-frame', async (req, res) => {
 // Body: { photoUrl, audioUrls, subtitles, bgmUrl, duration, projectId }
 // Returns: { success, hookVideoUrl }
 app.post('/hook', async (req, res) => {
+  const fs = require('fs')
   const { photoUrl, bgmUrl, subtitles, colorGrade } = req.body
   
   if (!photoUrl) return res.status(400).json({ success: false, error: 'photoUrl is required' })
