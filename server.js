@@ -1118,17 +1118,23 @@ app.post('/hook', async (req, res) => {
       const seg3Path = path.join(workDir, 'seg3.mp4')
       const concatPath = path.join(workDir, 'concat.mp4')
       
-      // Segment 1: Neutral expression with slow zoom (2.5s)
-      console.log('[hook] Creating segment 1: neutral with slow zoom')
-      execSync(`ffmpeg -y -loop 1 -i "${photo1Path}" -t 2.5 -vf "scale=4000:-1,zoompan=z='min(zoom+0.005,1.5)':d=62:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1080x1920,format=yuv420p" -r 25 -c:v libx264 -preset veryfast -crf 23 "${seg1Path}"`)
+      // Cinematic 3D depth filters for each segment
+      const cinematicBase = "curves=r='0/0 0.25/0.15 0.75/0.85 1/1':g='0/0 0.25/0.15 0.75/0.85 1/1':b='0/0 0.3/0.2 0.7/0.8 1/1',vignette=PI/2.5,curves=psych,unsharp=lx=7:ly=7:la=2.0:cx=7:cy=7:ca=0"
       
-      // Segment 2: Surprised expression with faster zoom (2.5s)
-      console.log('[hook] Creating segment 2: surprised with faster zoom')
-      execSync(`ffmpeg -y -loop 1 -i "${photo2Path}" -t 2.5 -vf "scale=4000:-1,zoompan=z='min(zoom+0.008,1.5)':d=62:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1080x1920,format=yuv420p" -r 25 -c:v libx264 -preset veryfast -crf 23 "${seg2Path}"`)
+      // Segment 1: Neutral expression with slow zoom + cold split-tone (2.5s)
+      console.log('[hook] Creating segment 1: neutral with slow zoom + 3D depth')
+      const seg1Filter = `scale=4000:-1,zoompan=z='min(zoom+0.005,1.5)':d=62:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1080x1920,${cinematicBase},colorbalance=ss=-0.3:ms=0.1:hs=0.3,format=yuv420p`
+      execSync(`ffmpeg -y -loop 1 -i "${photo1Path}" -t 2.5 -vf "${seg1Filter}" -r 25 -c:v libx264 -preset veryfast -crf 23 "${seg1Path}"`)
       
-      // Segment 3: Fear expression with vignette (2.5s)
-      console.log('[hook] Creating segment 3: fear with vignette')
-      execSync(`ffmpeg -y -loop 1 -i "${photo3Path}" -t 2.5 -vf "scale=4000:-1,zoompan=z='min(zoom+0.005,1.5)':d=62:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1080x1920,vignette=PI/4,format=yuv420p" -r 25 -c:v libx264 -preset veryfast -crf 23 "${seg3Path}"`)
+      // Segment 2: Surprised expression with faster zoom + warm split-tone (2.5s)
+      console.log('[hook] Creating segment 2: surprised with faster zoom + 3D depth')
+      const seg2Filter = `scale=4000:-1,zoompan=z='min(zoom+0.008,1.5)':d=62:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1080x1920,${cinematicBase},colorbalance=ss=0.3:ms=0.1:hs=-0.2,format=yuv420p`
+      execSync(`ffmpeg -y -loop 1 -i "${photo2Path}" -t 2.5 -vf "${seg2Filter}" -r 25 -c:v libx264 -preset veryfast -crf 23 "${seg2Path}"`)
+      
+      // Segment 3: Fear expression with dramatic vignette + cold split-tone (2.5s)
+      console.log('[hook] Creating segment 3: fear with dramatic vignette + 3D depth')
+      const seg3Filter = `scale=4000:-1,zoompan=z='min(zoom+0.005,1.5)':d=62:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1080x1920,${cinematicBase},colorbalance=ss=-0.3:ms=0.1:hs=0.3,format=yuv420p`
+      execSync(`ffmpeg -y -loop 1 -i "${photo3Path}" -t 2.5 -vf "${seg3Filter}" -r 25 -c:v libx264 -preset veryfast -crf 23 "${seg3Path}"`)
       
       // Concatenate 3 segments
       console.log('[hook] Concatenating 3 segments')
