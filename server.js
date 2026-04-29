@@ -1149,15 +1149,18 @@ app.post('/hook', async (req, res) => {
       const photoBuffer = await photoRes.arrayBuffer()
       fs.writeFileSync(photoPath, Buffer.from(photoBuffer))
       
+      // Movie poster cinematic color grading
       const colorFilters = {
-        cold: 'eq=contrast=1.3:brightness=-0.08:saturation=0.8',
-        warm: 'eq=contrast=1.1:brightness=0.05:saturation=1.2',
-        epic: 'eq=contrast=1.5:brightness=-0.1:saturation=0.9',
-        cinematic: 'eq=contrast=1.2:brightness=-0.05:saturation=1.0'
+        cold: 'curves=vintage,colorchannelmixer=rr=0.7:gg=0.8:bb=1.3,eq=contrast=1.5:brightness=-0.1:saturation=0.7,vignette=PI/3',
+        warm: 'curves=vintage,colorchannelmixer=rr=1.3:gg=1.0:bb=0.7,eq=contrast=1.4:brightness=-0.05:saturation=1.2,vignette=PI/3',
+        epic: 'colorchannelmixer=rr=1.1:gg=0.85:bb=0.75,eq=contrast=1.8:brightness=-0.15:saturation=0.8,vignette=PI/2',
+        cinematic: 'colorchannelmixer=rr=0.9:gg=0.9:bb=1.1,eq=contrast=1.5:saturation=0.85,vignette=PI/3'
       }
       const colorFilter = colorFilters[colorGrade] || colorFilters.cinematic
       
-      execSync(`ffmpeg -y -loop 1 -i "${photoPath}" -i "${bgmPath}" -filter_complex "[0:v]scale=4000:-1,zoompan=z='min(zoom+0.005,1.5)':d=200:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1080x1920,${colorFilter},vignette=PI/4,drawtext=fontfile=${font}:text='${line1}':fontcolor=white:fontsize=56:x=(w-text_w)/2:y=h*0.72:enable='between(t,0.5,2.5)',drawtext=fontfile=${font}:text='${line2}':fontcolor=white:fontsize=48:x=(w-text_w)/2:y=h*0.75:enable='between(t,3,5)',drawtext=fontfile=${font}:text='${line3}':fontcolor=white:fontsize=52:x=(w-text_w)/2:y=h*0.78:enable='between(t,5.5,7.5)',format=yuv420p[v];[1:a]volume=0.2[a]" -map "[v]" -map "[a]" -t 8 -r 25 -c:v libx264 -c:a aac "${outputPath}"`)
+      // Movie poster style: title at top, subtitles at bottom, letterbox bars, fade in
+      const line1Upper = line1.toUpperCase()
+      execSync(`ffmpeg -y -loop 1 -i "${photoPath}" -i "${bgmPath}" -filter_complex "[0:v]scale=4000:-1,zoompan=z='min(zoom+0.005,1.5)':d=200:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1080x1920,${colorFilter},drawbox=x=0:y=0:w=iw:h=ih*0.08:color=black:t=fill,drawbox=x=0:y=ih*0.92:w=iw:h=ih*0.08:color=black:t=fill,drawtext=fontfile=${font}:text='${line1Upper}':fontcolor=white:fontsize=72:x=(w-text_w)/2:y=h*0.1:shadowcolor=black:shadowx=3:shadowy=3:enable='between(t,0.5,2.5)',drawtext=fontfile=${font}:text='${line2}':fontcolor=white:fontsize=48:x=(w-text_w)/2:y=h*0.8:shadowcolor=black:shadowx=2:shadowy=2:enable='between(t,3,5)',drawtext=fontfile=${font}:text='${line3}':fontcolor=white:fontsize=48:x=(w-text_w)/2:y=h*0.88:shadowcolor=black:shadowx=2:shadowy=2:enable='between(t,5.5,7.5)',fade=t=in:st=0:d=0.5,format=yuv420p[v];[1:a]volume=0.2[a]" -map "[v]" -map "[a]" -t 8 -r 25 -c:v libx264 -c:a aac "${outputPath}"`)
     }
     
     // Upload to Supabase
