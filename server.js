@@ -1119,7 +1119,7 @@ app.post('/hook', async (req, res) => {
       const concatPath = path.join(workDir, 'concat.mp4')
       
       // Cinematic 3D depth filters for each segment
-      const cinematicBase = "curves=r='0/0 0.25/0.15 0.75/0.85 1/1':g='0/0 0.25/0.15 0.75/0.85 1/1':b='0/0 0.3/0.2 0.7/0.8 1/1',vignette=PI/2.5,curves=psych,unsharp=lx=7:ly=7:la=2.0:cx=7:cy=7:ca=0"
+      const cinematicBase = "curves=r='0/0 0.25/0.15 0.75/0.85 1/1':g='0/0 0.25/0.15 0.75/0.85 1/1':b='0/0 0.3/0.2 0.7/0.8 1/1',vignette=PI/2.5,eq=contrast=1.8:brightness=-0.15:saturation=0.6,unsharp=lx=7:ly=7:la=2.0:cx=7:cy=7:ca=0"
       
       // Segment 1: Neutral expression with slow zoom + cold split-tone (2.5s)
       console.log('[hook] Creating segment 1: neutral with slow zoom + 3D depth')
