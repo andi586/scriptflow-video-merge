@@ -1060,25 +1060,28 @@ app.post('/extract-frame', async (req, res) => {
 });
 
 // ─── POST /hook ───────────────────────────────────────────────────────────────
-// Creates a 15-second hook video: static photo + TTS audio lines + subtitles + BGM
-// Body: { photoUrl, audioUrls, subtitles, bgmUrl, duration, projectId }
+// Creates a hook video with 3-photo expression switching or single photo
+// Body: { photoUrls: [url1, url2, url3], photoUrl, bgmUrl, subtitles, colorGrade }
 // Returns: { success, hookVideoUrl }
 app.post('/hook', async (req, res) => {
   const fs = require('fs')
-  const { photoUrl, bgmUrl, subtitles, colorGrade } = req.body
+  const { photoUrl, photoUrls, bgmUrl, subtitles, colorGrade } = req.body
   
-  if (!photoUrl) return res.status(400).json({ success: false, error: 'photoUrl is required' })
+  // Accept either photoUrls array (3 photos) or photoUrl (single)
+  const useMultiPhoto = Array.isArray(photoUrls) && photoUrls.length === 3
+  if (!useMultiPhoto && !photoUrl) {
+    return res.status(400).json({ success: false, error: 'photoUrl or photoUrls (3 items) is required' })
+  }
   
   const id = require('uuid').v4()
-  const photoPath = `/tmp/${id}_photo.jpg`
-  const bgmPath = `/tmp/${id}_bgm.mp3`
-  const outputPath = `/tmp/${id}_hook.mp4`
+  const workDir = `/tmp/${id}_hook`
+  fs.mkdirSync(workDir, { recursive: true })
+  
+  const bgmPath = path.join(workDir, 'bgm.mp3')
+  const outputPath = path.join(workDir, 'hook.mp4')
   
   try {
-    const photoRes = await fetch(photoUrl)
-    const photoBuffer = await photoRes.arrayBuffer()
-    fs.writeFileSync(photoPath, Buffer.from(photoBuffer))
-    
+    // Download BGM
     const bgmRes = await fetch(bgmUrl)
     const bgmBuffer = await bgmRes.arrayBuffer()
     fs.writeFileSync(bgmPath, Buffer.from(bgmBuffer))
@@ -1087,29 +1090,87 @@ app.post('/hook', async (req, res) => {
     const line2 = (subtitles?.[1]?.text || 'But something is wrong.').replace(/'/g, '').replace(/:/g, ' ')
     const line3 = (subtitles?.[2]?.text || 'Watch your full movie.').replace(/'/g, '').replace(/:/g, ' ')
     
-    const colorFilters = {
-      cold: 'eq=contrast=1.3:brightness=-0.08:saturation=0.8',
-      warm: 'eq=contrast=1.1:brightness=0.05:saturation=1.2',
-      epic: 'eq=contrast=1.5:brightness=-0.1:saturation=0.9',
-      cinematic: 'eq=contrast=1.2:brightness=-0.05:saturation=1.0'
-    }
-    const colorFilter = colorFilters[colorGrade] || colorFilters.cinematic
-    
     const font = '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc'
-    
     const { execSync } = require('child_process')
-    execSync(`ffmpeg -y -loop 1 -i "${photoPath}" -i "${bgmPath}" -filter_complex "[0:v]scale=4000:-1,zoompan=z='min(zoom+0.005,1.5)':d=200:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1080x1920,${colorFilter},vignette=PI/4,drawtext=fontfile=${font}:text='${line1}':fontcolor=white:fontsize=56:x=(w-text_w)/2:y=h*0.72:enable='between(t,0.5,2.5)',drawtext=fontfile=${font}:text='${line2}':fontcolor=white:fontsize=48:x=(w-text_w)/2:y=h*0.75:enable='between(t,3,5)',drawtext=fontfile=${font}:text='${line3}':fontcolor=white:fontsize=52:x=(w-text_w)/2:y=h*0.78:enable='between(t,5.5,7.5)',format=yuv420p[v];[1:a]volume=0.2[a]" -map "[v]" -map "[a]" -t 8 -r 25 -c:v libx264 -c:a aac "${outputPath}"`)
     
+    if (useMultiPhoto) {
+      // ─── 3-PHOTO MODE: Create 3 segments with different effects ───────────
+      console.log('[hook] 3-photo mode: creating segments')
+      
+      // Download 3 photos
+      const photo1Path = path.join(workDir, 'photo1.jpg')
+      const photo2Path = path.join(workDir, 'photo2.jpg')
+      const photo3Path = path.join(workDir, 'photo3.jpg')
+      
+      const [res1, res2, res3] = await Promise.all([
+        fetch(photoUrls[0]),
+        fetch(photoUrls[1]),
+        fetch(photoUrls[2])
+      ])
+      
+      fs.writeFileSync(photo1Path, Buffer.from(await res1.arrayBuffer()))
+      fs.writeFileSync(photo2Path, Buffer.from(await res2.arrayBuffer()))
+      fs.writeFileSync(photo3Path, Buffer.from(await res3.arrayBuffer()))
+      
+      // Segment paths
+      const seg1Path = path.join(workDir, 'seg1.mp4')
+      const seg2Path = path.join(workDir, 'seg2.mp4')
+      const seg3Path = path.join(workDir, 'seg3.mp4')
+      const concatPath = path.join(workDir, 'concat.mp4')
+      
+      // Segment 1: Neutral expression with slow zoom (2.5s)
+      console.log('[hook] Creating segment 1: neutral with slow zoom')
+      execSync(`ffmpeg -y -loop 1 -i "${photo1Path}" -t 2.5 -vf "scale=4000:-1,zoompan=z='min(zoom+0.005,1.5)':d=62:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1080x1920,format=yuv420p" -r 25 -c:v libx264 -preset veryfast -crf 23 "${seg1Path}"`)
+      
+      // Segment 2: Surprised expression with faster zoom (2.5s)
+      console.log('[hook] Creating segment 2: surprised with faster zoom')
+      execSync(`ffmpeg -y -loop 1 -i "${photo2Path}" -t 2.5 -vf "scale=4000:-1,zoompan=z='min(zoom+0.008,1.5)':d=62:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1080x1920,format=yuv420p" -r 25 -c:v libx264 -preset veryfast -crf 23 "${seg2Path}"`)
+      
+      // Segment 3: Fear expression with vignette (2.5s)
+      console.log('[hook] Creating segment 3: fear with vignette')
+      execSync(`ffmpeg -y -loop 1 -i "${photo3Path}" -t 2.5 -vf "scale=4000:-1,zoompan=z='min(zoom+0.005,1.5)':d=62:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1080x1920,vignette=PI/4,format=yuv420p" -r 25 -c:v libx264 -preset veryfast -crf 23 "${seg3Path}"`)
+      
+      // Concatenate 3 segments
+      console.log('[hook] Concatenating 3 segments')
+      const concatListPath = path.join(workDir, 'concat.txt')
+      fs.writeFileSync(concatListPath, `file '${seg1Path}'\nfile '${seg2Path}'\nfile '${seg3Path}'`)
+      execSync(`ffmpeg -y -f concat -safe 0 -i "${concatListPath}" -c copy "${concatPath}"`)
+      
+      // Add subtitles and BGM to final video
+      console.log('[hook] Adding subtitles and BGM')
+      execSync(`ffmpeg -y -i "${concatPath}" -i "${bgmPath}" -filter_complex "[0:v]drawtext=fontfile=${font}:text='${line1}':fontcolor=white:fontsize=56:x=(w-text_w)/2:y=h*0.72:enable='between(t,0.5,2.5)',drawtext=fontfile=${font}:text='${line2}':fontcolor=white:fontsize=48:x=(w-text_w)/2:y=h*0.75:enable='between(t,3,5)',drawtext=fontfile=${font}:text='${line3}':fontcolor=white:fontsize=52:x=(w-text_w)/2:y=h*0.78:enable='between(t,5.5,7.5)'[v];[1:a]volume=0.2[a]" -map "[v]" -map "[a]" -t 8 -r 25 -c:v libx264 -preset veryfast -crf 23 -c:a aac -b:a 192k "${outputPath}"`)
+      
+    } else {
+      // ─── SINGLE PHOTO MODE: Use existing logic ────────────────────────────
+      console.log('[hook] Single photo mode')
+      const photoPath = path.join(workDir, 'photo.jpg')
+      
+      const photoRes = await fetch(photoUrl)
+      const photoBuffer = await photoRes.arrayBuffer()
+      fs.writeFileSync(photoPath, Buffer.from(photoBuffer))
+      
+      const colorFilters = {
+        cold: 'eq=contrast=1.3:brightness=-0.08:saturation=0.8',
+        warm: 'eq=contrast=1.1:brightness=0.05:saturation=1.2',
+        epic: 'eq=contrast=1.5:brightness=-0.1:saturation=0.9',
+        cinematic: 'eq=contrast=1.2:brightness=-0.05:saturation=1.0'
+      }
+      const colorFilter = colorFilters[colorGrade] || colorFilters.cinematic
+      
+      execSync(`ffmpeg -y -loop 1 -i "${photoPath}" -i "${bgmPath}" -filter_complex "[0:v]scale=4000:-1,zoompan=z='min(zoom+0.005,1.5)':d=200:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1080x1920,${colorFilter},vignette=PI/4,drawtext=fontfile=${font}:text='${line1}':fontcolor=white:fontsize=56:x=(w-text_w)/2:y=h*0.72:enable='between(t,0.5,2.5)',drawtext=fontfile=${font}:text='${line2}':fontcolor=white:fontsize=48:x=(w-text_w)/2:y=h*0.75:enable='between(t,3,5)',drawtext=fontfile=${font}:text='${line3}':fontcolor=white:fontsize=52:x=(w-text_w)/2:y=h*0.78:enable='between(t,5.5,7.5)',format=yuv420p[v];[1:a]volume=0.2[a]" -map "[v]" -map "[a]" -t 8 -r 25 -c:v libx264 -c:a aac "${outputPath}"`)
+    }
+    
+    // Upload to Supabase
     const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY)
     const fileBuffer = fs.readFileSync(outputPath)
     const fileName = `hooks/hook_${Date.now()}.mp4`
     await supabase.storage.from('generated-videos').upload(fileName, fileBuffer, { contentType: 'video/mp4', upsert: true })
     const { data: urlData } = supabase.storage.from('generated-videos').getPublicUrl(fileName)
     
-    fs.unlinkSync(photoPath)
-    fs.unlinkSync(bgmPath)
-    fs.unlinkSync(outputPath)
+    // Cleanup
+    fs.rmSync(workDir, { recursive: true, force: true })
     
+    console.log('[hook] Success:', urlData.publicUrl)
     res.json({ success: true, hookVideoUrl: urlData.publicUrl })
   } catch (err) {
     console.error('[hook] error:', err.message)
