@@ -1061,11 +1061,11 @@ app.post('/extract-frame', async (req, res) => {
 
 // ─── POST /hook ───────────────────────────────────────────────────────────────
 // Creates a hook video with 3-photo expression switching or single photo
-// Body: { photoUrls: [url1, url2, url3], photoUrl, bgmUrl, subtitles, colorGrade }
+// Body: { photoUrls: [url1, url2, url3], photoUrl, bgmUrl, subtitles, colorGrade, movieId }
 // Returns: { success, hookVideoUrl }
 app.post('/hook', async (req, res) => {
   const fs = require('fs')
-  const { photoUrl, photoUrls, bgmUrl, subtitles, colorGrade } = req.body
+  const { photoUrl, photoUrls, bgmUrl, subtitles, colorGrade, movieId } = req.body
   
   // Accept either photoUrls array (3 photos) or photoUrl (single)
   const useMultiPhoto = Array.isArray(photoUrls) && photoUrls.length === 3
@@ -1081,10 +1081,25 @@ app.post('/hook', async (req, res) => {
   const outputPath = path.join(workDir, 'hook.mp4')
   
   try {
-    // Download BGM
-    const bgmRes = await fetch(bgmUrl)
-    const bgmBuffer = await bgmRes.arrayBuffer()
-    fs.writeFileSync(bgmPath, Buffer.from(bgmBuffer))
+    // Download BGM with fallback
+    let hasBgm = false
+    if (bgmUrl) {
+      try {
+        const bgmRes = await fetch(bgmUrl)
+        if (bgmRes.ok) {
+          const bgmBuffer = await bgmRes.arrayBuffer()
+          fs.writeFileSync(bgmPath, Buffer.from(bgmBuffer))
+          hasBgm = true
+          console.log('[hook] BGM downloaded successfully')
+        } else {
+          console.warn('[hook] BGM download failed (status ' + bgmRes.status + '), continuing without BGM')
+        }
+      } catch (bgmErr) {
+        console.warn('[hook] BGM download error (continuing without BGM):', bgmErr.message)
+      }
+    } else {
+      console.log('[hook] No BGM URL provided, continuing without BGM')
+    }
     
     const line1 = (subtitles?.[0]?.text || 'This is you.').replace(/'/g, '').replace(/:/g, ' ')
     const line2 = (subtitles?.[1]?.text || 'But something is wrong.').replace(/'/g, '').replace(/:/g, ' ')
@@ -1145,8 +1160,13 @@ app.post('/hook', async (req, res) => {
       execSync(`ffmpeg -y -f concat -safe 0 -i "${concatListPath}" -c copy "${concatPath}"`)
       
       // Add subtitles and BGM to final video
-      console.log('[hook] Adding subtitles and BGM')
-      execSync(`ffmpeg -y -i "${concatPath}" -i "${bgmPath}" -filter_complex "[0:v]drawtext=fontfile=${font}:text='${line1}':fontcolor=white:fontsize=56:x=(w-text_w)/2:y=h*0.72:enable='between(t,0.5,2.5)',drawtext=fontfile=${font}:text='${line2}':fontcolor=white:fontsize=48:x=(w-text_w)/2:y=h*0.75:enable='between(t,3,5)',drawtext=fontfile=${font}:text='${line3}':fontcolor=white:fontsize=52:x=(w-text_w)/2:y=h*0.78:enable='between(t,5.5,7.5)'[v];[1:a]volume=0.2[a]" -map "[v]" -map "[a]" -t 8 -r 25 -c:v libx264 -preset veryfast -crf 23 -c:a aac -b:a 192k "${outputPath}"`)
+      console.log('[hook] Adding subtitles' + (hasBgm ? ' and BGM' : ' (no BGM)'))
+      if (hasBgm) {
+        execSync(`ffmpeg -y -i "${concatPath}" -i "${bgmPath}" -filter_complex "[0:v]drawtext=fontfile=${font}:text='${line1}':fontcolor=white:fontsize=56:x=(w-text_w)/2:y=h*0.72:enable='between(t,0.5,2.5)',drawtext=fontfile=${font}:text='${line2}':fontcolor=white:fontsize=48:x=(w-text_w)/2:y=h*0.75:enable='between(t,3,5)',drawtext=fontfile=${font}:text='${line3}':fontcolor=white:fontsize=52:x=(w-text_w)/2:y=h*0.78:enable='between(t,5.5,7.5)'[v];[1:a]volume=0.2[a]" -map "[v]" -map "[a]" -t 8 -r 25 -c:v libx264 -preset veryfast -crf 23 -c:a aac -b:a 192k "${outputPath}"`)
+      } else {
+        // No BGM: add subtitles only with silent audio
+        execSync(`ffmpeg -y -i "${concatPath}" -f lavfi -i anullsrc=r=48000:cl=stereo -filter_complex "[0:v]drawtext=fontfile=${font}:text='${line1}':fontcolor=white:fontsize=56:x=(w-text_w)/2:y=h*0.72:enable='between(t,0.5,2.5)',drawtext=fontfile=${font}:text='${line2}':fontcolor=white:fontsize=48:x=(w-text_w)/2:y=h*0.75:enable='between(t,3,5)',drawtext=fontfile=${font}:text='${line3}':fontcolor=white:fontsize=52:x=(w-text_w)/2:y=h*0.78:enable='between(t,5.5,7.5)'[v]" -map "[v]" -map 1:a -t 8 -r 25 -c:v libx264 -preset veryfast -crf 23 -c:a aac -b:a 192k "${outputPath}"`)
+      }
       
     } else {
       // ─── SINGLE PHOTO MODE: Use existing logic ────────────────────────────
@@ -1168,21 +1188,43 @@ app.post('/hook', async (req, res) => {
       
       // Movie poster style: title at top, subtitles at bottom, letterbox bars, fade in
       const line1Upper = line1.toUpperCase()
-      execSync(`ffmpeg -y -loop 1 -i "${photoPath}" -i "${bgmPath}" -filter_complex "[0:v]scale=4000:-1,zoompan=z='min(zoom+0.005,1.5)':d=200:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1080x1920,${colorFilter},drawbox=x=0:y=0:w=iw:h=ih*0.08:color=black:t=fill,drawbox=x=0:y=ih*0.92:w=iw:h=ih*0.08:color=black:t=fill,drawtext=fontfile=${font}:text='${line1Upper}':fontcolor=white:fontsize=72:x=(w-text_w)/2:y=h*0.1:shadowcolor=black:shadowx=3:shadowy=3:enable='between(t,0.5,2.5)',drawtext=fontfile=${font}:text='${line2}':fontcolor=white:fontsize=48:x=(w-text_w)/2:y=h*0.8:shadowcolor=black:shadowx=2:shadowy=2:enable='between(t,3,5)',drawtext=fontfile=${font}:text='${line3}':fontcolor=white:fontsize=48:x=(w-text_w)/2:y=h*0.88:shadowcolor=black:shadowx=2:shadowy=2:enable='between(t,5.5,7.5)',fade=t=in:st=0:d=0.5,format=yuv420p[v];[1:a]volume=0.2[a]" -map "[v]" -map "[a]" -t 8 -r 25 -c:v libx264 -c:a aac "${outputPath}"`)
+      if (hasBgm) {
+        execSync(`ffmpeg -y -loop 1 -i "${photoPath}" -i "${bgmPath}" -filter_complex "[0:v]scale=4000:-1,zoompan=z='min(zoom+0.005,1.5)':d=200:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1080x1920,${colorFilter},drawbox=x=0:y=0:w=iw:h=ih*0.08:color=black:t=fill,drawbox=x=0:y=ih*0.92:w=iw:h=ih*0.08:color=black:t=fill,drawtext=fontfile=${font}:text='${line1Upper}':fontcolor=white:fontsize=72:x=(w-text_w)/2:y=h*0.1:shadowcolor=black:shadowx=3:shadowy=3:enable='between(t,0.5,2.5)',drawtext=fontfile=${font}:text='${line2}':fontcolor=white:fontsize=48:x=(w-text_w)/2:y=h*0.8:shadowcolor=black:shadowx=2:shadowy=2:enable='between(t,3,5)',drawtext=fontfile=${font}:text='${line3}':fontcolor=white:fontsize=48:x=(w-text_w)/2:y=h*0.88:shadowcolor=black:shadowx=2:shadowy=2:enable='between(t,5.5,7.5)',fade=t=in:st=0:d=0.5,format=yuv420p[v];[1:a]volume=0.2[a]" -map "[v]" -map "[a]" -t 8 -r 25 -c:v libx264 -c:a aac "${outputPath}"`)
+      } else {
+        // No BGM: add subtitles only with silent audio
+        execSync(`ffmpeg -y -loop 1 -i "${photoPath}" -f lavfi -i anullsrc=r=48000:cl=stereo -filter_complex "[0:v]scale=4000:-1,zoompan=z='min(zoom+0.005,1.5)':d=200:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1080x1920,${colorFilter},drawbox=x=0:y=0:w=iw:h=ih*0.08:color=black:t=fill,drawbox=x=0:y=ih*0.92:w=iw:h=ih*0.08:color=black:t=fill,drawtext=fontfile=${font}:text='${line1Upper}':fontcolor=white:fontsize=72:x=(w-text_w)/2:y=h*0.1:shadowcolor=black:shadowx=3:shadowy=3:enable='between(t,0.5,2.5)',drawtext=fontfile=${font}:text='${line2}':fontcolor=white:fontsize=48:x=(w-text_w)/2:y=h*0.8:shadowcolor=black:shadowx=2:shadowy=2:enable='between(t,3,5)',drawtext=fontfile=${font}:text='${line3}':fontcolor=white:fontsize=48:x=(w-text_w)/2:y=h*0.88:shadowcolor=black:shadowx=2:shadowy=2:enable='between(t,5.5,7.5)',fade=t=in:st=0:d=0.5,format=yuv420p[v]" -map "[v]" -map 1:a -t 8 -r 25 -c:v libx264 -c:a aac "${outputPath}"`)
+      }
     }
     
     // Upload to Supabase
-    const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY)
     const fileBuffer = fs.readFileSync(outputPath)
     const fileName = `hooks/hook_${Date.now()}.mp4`
     await supabase.storage.from('generated-videos').upload(fileName, fileBuffer, { contentType: 'video/mp4', upsert: true })
     const { data: urlData } = supabase.storage.from('generated-videos').getPublicUrl(fileName)
+    const hookVideoUrl = urlData.publicUrl
+    
+    // Update movies table with hook_video_url if movieId is provided
+    if (movieId) {
+      try {
+        const { error: updateErr } = await supabase
+          .from('movies')
+          .update({ hook_video_url: hookVideoUrl })
+          .eq('id', movieId)
+        if (updateErr) {
+          console.warn('[hook] Failed to update movies table:', updateErr.message)
+        } else {
+          console.log('[hook] Updated movies table with hook_video_url for:', movieId)
+        }
+      } catch (dbErr) {
+        console.warn('[hook] Database update error (non-fatal):', dbErr.message)
+      }
+    }
     
     // Cleanup
     fs.rmSync(workDir, { recursive: true, force: true })
     
-    console.log('[hook] Success:', urlData.publicUrl)
-    res.json({ success: true, hookVideoUrl: urlData.publicUrl })
+    console.log('[hook] Success:', hookVideoUrl)
+    res.json({ success: true, hookVideoUrl })
   } catch (err) {
     console.error('[hook] error:', err.message)
     res.status(500).json({ success: false, error: err.message })
