@@ -470,81 +470,106 @@ app.post('/merge', async (req, res) => {
     });
 
     // ── Watermark ─────────────────────────────────────────────────────────
-    // Determine user tier from Supabase, then burn watermark into video.
-    // Director Pass → subtle watermark; Basic (default) → standard watermark.
+    // Check if movie is paid - if paid, skip watermark entirely
     const watermarkedPath = path.join(workDir, 'watermarked.mp4');
     console.log('[watermark] function called, requestId:', requestId);
+    
+    let isPaidMovie = false;
     try {
-      // Step 1: get user_id from projects table
-      let userId = null;
+      // Check if this is a paid movie from movies table
+      const { data: movieRow } = await supabase
+        .from('movies')
+        .select('paid')
+        .eq('id', projectId)
+        .single();
+      isPaidMovie = movieRow?.paid === true;
+      console.log('[watermark] Movie paid status:', isPaidMovie);
+    } catch (e) {
+      console.warn('[watermark] Could not check paid status: ' + e.message);
+    }
+
+    // If paid, skip watermark entirely - just copy the file
+    if (isPaidMovie) {
+      console.log('[watermark][' + requestId + '] Paid movie - skipping watermark');
       try {
-        const { data: projRow } = await supabase
-          .from('projects')
-          .select('user_id')
-          .eq('id', projectId)
-          .single();
-        userId = projRow?.user_id ?? null;
-      } catch (e) {
-        console.warn('[watermark] Could not fetch user_id: ' + e.message);
+        await fsp.copyFile(humanTouchPath, watermarkedPath);
+      } catch (copyErr) {
+        console.warn('[watermark] Copy failed, using original path');
       }
-
-      // Step 2: check subscription tier
-      let isDirectorPass = false;
-      if (userId) {
+    } else {
+      // Unpaid/hook videos - apply watermark
+      try {
+        // Step 1: get user_id from projects table
+        let userId = null;
         try {
-          // Try subscriptions table first
-          const { data: subRow } = await supabase
-            .from('subscriptions')
-            .select('plan, status')
-            .eq('user_id', userId)
-            .in('status', ['active', 'trialing'])
-            .order('created_at', { ascending: false })
-            .limit(1)
+          const { data: projRow } = await supabase
+            .from('projects')
+            .select('user_id')
+            .eq('id', projectId)
             .single();
-          if (subRow) {
-            const plan = (subRow.plan || '').toLowerCase();
-            isDirectorPass = plan.includes('director') || plan.includes('pro') || plan.includes('premium');
-          }
+          userId = projRow?.user_id ?? null;
         } catch (e) {
-          console.warn('[watermark] Subscription lookup failed (defaulting to Basic): ' + e.message);
+          console.warn('[watermark] Could not fetch user_id: ' + e.message);
         }
-      }
 
-      // Step 3: burn watermark — bottom-right, clearly visible
-      const watermarkText = 'getscriptflow.com';
-      const drawtext = "drawtext=fontfile='" + DEJAVU_FONT + "':text='" + watermarkText + "':fontsize=30:fontcolor=white@0.7:borderw=2:bordercolor=black@0.5:x=(w-tw)/2:y=h*0.82:enable='if(gte(t,2),1,0)'";
-
-      console.log('[watermark][' + requestId + '] tier=' + (isDirectorPass ? 'director_pass' : 'basic') + ' text="' + watermarkText + '"');
-
-      await new Promise((resolve, reject) => {
-        const { spawn } = require('child_process');
-        const args = [
-          '-i', humanTouchPath,
-          '-vf', drawtext,
-          '-c:v', 'libx264',
-          '-crf', '23',
-          '-preset', 'medium',
-          '-c:a', 'copy',
-          '-y',
-          watermarkedPath,
-        ];
-        console.log('[watermark] ffmpeg args:', args.join(' '));
-        const proc = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] });
-        let stderr = '';
-        proc.stderr.on('data', (d) => { stderr += d.toString(); });
-        proc.on('close', (code) => {
-          if (code === 0) {
-            console.log('[watermark][' + requestId + '] Watermark applied.');
-            resolve();
-          } else {
-            reject(new Error('Watermark ffmpeg exit ' + code + ': ' + stderr.slice(-500)));
+        // Step 2: check subscription tier
+        let isDirectorPass = false;
+        if (userId) {
+          try {
+            // Try subscriptions table first
+            const { data: subRow } = await supabase
+              .from('subscriptions')
+              .select('plan, status')
+              .eq('user_id', userId)
+              .in('status', ['active', 'trialing'])
+              .order('created_at', { ascending: false })
+              .limit(1)
+              .single();
+            if (subRow) {
+              const plan = (subRow.plan || '').toLowerCase();
+              isDirectorPass = plan.includes('director') || plan.includes('pro') || plan.includes('premium');
+            }
+          } catch (e) {
+            console.warn('[watermark] Subscription lookup failed (defaulting to Basic): ' + e.message);
           }
+        }
+
+        // Step 3: burn watermark — bottom-right, clearly visible
+        const watermarkText = 'getscriptflow.com';
+        const drawtext = "drawtext=fontfile='" + DEJAVU_FONT + "':text='" + watermarkText + "':fontsize=30:fontcolor=white@0.7:borderw=2:bordercolor=black@0.5:x=(w-tw)/2:y=h*0.82:enable='if(gte(t,2),1,0)'";
+
+        console.log('[watermark][' + requestId + '] tier=' + (isDirectorPass ? 'director_pass' : 'basic') + ' text="' + watermarkText + '"');
+
+        await new Promise((resolve, reject) => {
+          const { spawn } = require('child_process');
+          const args = [
+            '-i', humanTouchPath,
+            '-vf', drawtext,
+            '-c:v', 'libx264',
+            '-crf', '23',
+            '-preset', 'medium',
+            '-c:a', 'copy',
+            '-y',
+            watermarkedPath,
+          ];
+          console.log('[watermark] ffmpeg args:', args.join(' '));
+          const proc = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+          let stderr = '';
+          proc.stderr.on('data', (d) => { stderr += d.toString(); });
+          proc.on('close', (code) => {
+            if (code === 0) {
+              console.log('[watermark][' + requestId + '] Watermark applied.');
+              resolve();
+            } else {
+              reject(new Error('Watermark ffmpeg exit ' + code + ': ' + stderr.slice(-500)));
+            }
+          });
         });
-      });
-    } catch (wmErr) {
-      // Watermark failure is non-fatal: fall back to un-watermarked video
-      console.warn('[watermark][' + requestId + '] Watermark failed (using humantouch output): ' + wmErr.message);
-      await fsp.copyFile(humanTouchPath, watermarkedPath).catch(() => {});
+      } catch (wmErr) {
+        // Watermark failure is non-fatal: fall back to un-watermarked video
+        console.warn('[watermark][' + requestId + '] Watermark failed (using humantouch output): ' + wmErr.message);
+        await fsp.copyFile(humanTouchPath, watermarkedPath).catch(() => {});
+      }
     }
     // ── End Watermark ──────────────────────────────────────────────────────
 
