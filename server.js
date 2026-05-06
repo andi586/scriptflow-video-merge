@@ -1377,10 +1377,15 @@ async function generateOneEmotion(imageUrl, prompt) {
   console.log('[replicate] raw output type:', typeof output)
   console.log('[replicate] raw output:', JSON.stringify(output))
   
+  // Replicate returns an object with url() method
+  if (output && typeof output.url === 'function') {
+    const url = await output.url()
+    console.log('[replicate] url():', url)
+    return url.href || String(url)
+  }
   if (typeof output === 'string') return output
   if (Array.isArray(output)) return output[0]
-  if (output && output.url) return output.url
-  return String(output)
+  return null
 }
 
 app.post('/api/generate-hook-emotion', async (req, res) => {
