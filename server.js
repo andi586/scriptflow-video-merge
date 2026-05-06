@@ -1415,6 +1415,75 @@ app.post('/api/generate-hook-emotion', async (req, res) => {
   }
 });
 
+// ─── POST /api/add-bgm-to-video ──────────────────────────────────────────────
+// Adds BGM to a video (for Seedance emotion videos)
+// Body: { videoUrl: string, bgmUrl?: string, movieId?: string }
+// Returns: { success: true, videoUrl: string }
+app.post('/api/add-bgm-to-video', async (req, res) => {
+  const { videoUrl, bgmUrl, movieId } = req.body;
+  if (!videoUrl) return res.status(400).json({ error: 'videoUrl required' });
+  
+  const id = require('uuid').v4();
+  const workDir = `/tmp/${id}_bgm`;
+  const fs = require('fs');
+  fs.mkdirSync(workDir, { recursive: true });
+  
+  try {
+    // Download video
+    const videoPath = path.join(workDir, 'input.mp4');
+    await download(videoUrl, videoPath);
+    
+    const outputPath = path.join(workDir, 'output.mp4');
+    
+    if (bgmUrl) {
+      // Download BGM
+      const bgmPath = path.join(workDir, 'bgm.mp3');
+      await download(bgmUrl, bgmPath);
+      
+      console.log('[add-bgm] Adding BGM to video...');
+      
+      // Add BGM to video
+      await new Promise((resolve, reject) => {
+        ffmpeg(videoPath)
+          .input(bgmPath)
+          .complexFilter([
+            '[1:a]volume=0.3,aloop=loop=-1:size=2147483647[bgm]',
+            '[bgm]atrim=duration=5[bgm_trim]'
+          ])
+          .map('0:v')
+          .map('[bgm_trim]')
+          .outputOptions(['-c:v copy', '-c:a aac', '-shortest'])
+          .save(outputPath)
+          .on('end', resolve)
+          .on('error', reject);
+      });
+    } else {
+      fs.copyFileSync(videoPath, outputPath);
+    }
+    
+    // Upload to Supabase
+    const fileName = `hooks/bgm_${Date.now()}.mp4`;
+    const fileBuffer = fs.readFileSync(outputPath);
+    const { data, error } = await supabase.storage
+      .from('generated-videos')
+      .upload(fileName, fileBuffer, { contentType: 'video/mp4', upsert: true });
+    
+    if (error) throw new Error(`Upload failed: ${error.message}`);
+    
+    const { data: urlData } = supabase.storage
+      .from('generated-videos')
+      .getPublicUrl(fileName);
+    
+    console.log('[add-bgm] Success:', urlData.publicUrl);
+    res.json({ success: true, videoUrl: urlData.publicUrl });
+  } catch (err) {
+    console.error('[add-bgm] error:', err);
+    res.status(500).json({ error: err.message });
+  } finally {
+    fs.rmSync(workDir, { recursive: true, force: true });
+  }
+});
+
 // ─── POST /api/burn-hook-subtitles ───────────────────────────────────────────
 // Burns subtitles onto a hook video with zero-delay emotional impact
 // Body: { videoUrl: string, subtitles: Array<{time: number, text: string}> }
