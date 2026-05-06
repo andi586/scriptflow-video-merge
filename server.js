@@ -1449,7 +1449,7 @@ app.post('/api/burn-hook-subtitles', async (req, res) => {
     const drawtextFilters = subtitles.map(sub => {
       const escapedText = sub.text.replace(/'/g, '').replace(/:/g, ' ').replace(/,/g, '\\,');
       const endTime = sub.time + 1.5; // Show for 1.5 seconds
-      return `drawtext=fontfile='${font}':text='${escapedText}':fontcolor=white:fontsize=56:x=(w-text_w)/2:y=(h-text_h)/2:shadowcolor=black@0.8:shadowx=3:shadowy=3:enable='between(t,${sub.time},${endTime})'`;
+      return `drawtext=fontfile='${font}':text='${escapedText}':fontcolor=white:fontsize=56:x=(w-text_w)/2:y=(h-th-100):shadowcolor=black@0.8:shadowx=3:shadowy=3:enable='between(t,${sub.time},${endTime})'`;
     }).join(',');
     
     console.log('[burn-hook-subtitles] Burning subtitles with FFmpeg...');
