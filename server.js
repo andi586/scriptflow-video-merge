@@ -5,15 +5,38 @@ const path = require('path');
 const crypto = require('crypto');
 const ffmpeg = require('fluent-ffmpeg');
 const { createClient } = require('@supabase/supabase-js');
+const ws = require('ws');
+const Replicate = require('replicate');
+
+// Check Replicate API token at startup
+console.log('[startup] REPLICATE_API_TOKEN exists:', 
+  !!process.env.REPLICATE_API_TOKEN,
+  'starts with r8_:', 
+  process.env.REPLICATE_API_TOKEN?.startsWith('r8_')
+);
 
 // Use system ffmpeg (installed via nixpacks.toml)
 // fluent-ffmpeg will auto-detect from PATH
+
+// Initialize Replicate for emotion generation
+const replicate = new Replicate({
+  auth: process.env.REPLICATE_API_TOKEN
+});
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
 
 const PORT = Number(process.env.PORT || 3000);
-const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } });
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY,
+  {
+    auth: { persistSession: false },
+    realtime: {
+      transport: ws
+    }
+  }
+);
 
 app.get('/health', (_req, res) => res.json({ success: true, ffmpegPath: 'system' }));
 
@@ -1298,5 +1321,140 @@ app.post('/extract-audio', async (req, res) => {
   } finally {
     fsp.unlink(videoPath).catch(() => {});
     fsp.unlink(audioPath).catch(() => {});
+  }
+});
+
+// ─── POST /api/generate-hook-emotion ─────────────────────────────────────────
+// 根据模板生成单个情绪视频 (只生成1个，节省成本)
+// Body: { imageUrl: string, template_id: string }
+// Returns: { success: true, emotion: string, videoUrl: string }
+
+// Template → Emotion mapping
+const TEMPLATE_EMOTION_MAP = {
+  'she_didnt_choose_you': 'sad',
+  'phone_3am': 'sad',
+  'lost_someone': 'sad',
+  'dog_last_words': 'sad',
+  'what_could_have_been': 'sad',
+  'parallel_universe': 'neutral',
+  'future_you': 'scared',
+  'future_warning': 'scared',
+  'last_person': 'sad',
+  'group_chat': 'sad',
+  'friend_betrayal': 'surprised',
+  'breaking_news': 'surprised'
+};
+
+const EMOTIONS = {
+  sad: `A close-up portrait video of the same person from the input image, very subtle facial emotion change to sad, minimal movement, natural blinking, cinematic lighting.`,
+  surprised: `A close-up portrait video of the same person from the input image becoming surprised, eyes widening, minimal movement, natural blinking.`,
+  scared: `A close-up portrait video of the same person from the input image becoming scared, tense expression, subtle fear, minimal movement.`,
+  neutral: `A calm neutral face of the same person from the input image, minimal movement, slight blinking.`
+};
+
+async function generateOneEmotion(imageUrl, prompt) {
+  console.log('[generate-hook-emotion] Generating with prompt:', prompt.substring(0, 50) + '...');
+  const output = await replicate.run(
+    "bytedance/seedance-1-lite",
+    {
+      input: {
+        prompt,
+        image: imageUrl,
+        duration: 5,
+        resolution: "720p",
+        fps: 24,
+        camera_fixed: true
+      }
+    }
+  );
+  console.log('[replicate] raw output:', JSON.stringify(output));
+  return Array.isArray(output) ? output[0] : output;
+}
+
+app.post('/api/generate-hook-emotion', async (req, res) => {
+  try {
+    const { imageUrl, template_id } = req.body;
+    if (!imageUrl) return res.status(400).json({ error: 'imageUrl required' });
+    
+    // Select ONE emotion based on template
+    const emotion = TEMPLATE_EMOTION_MAP[template_id] || 'neutral';
+    const prompt = EMOTIONS[emotion];
+    
+    console.log(`[generate-hook-emotion] Template: ${template_id} → Emotion: ${emotion}`);
+    console.log(`[generate-hook-emotion] Generating for: ${imageUrl}`);
+    
+    // Generate only ONE video
+    const videoUrl = await generateOneEmotion(imageUrl, prompt);
+    
+    console.log(`[generate-hook-emotion] Success:`, videoUrl);
+    res.json({ 
+      success: true, 
+      emotion,
+      videoUrl 
+    });
+  } catch (err) {
+    console.error('[generate-hook-emotion] error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── POST /api/burn-hook-subtitles ───────────────────────────────────────────
+// Burns subtitles onto a hook video with zero-delay emotional impact
+// Body: { videoUrl: string, subtitles: Array<{time: number, text: string}> }
+// Returns: { success: true, videoUrl: string }
+app.post('/api/burn-hook-subtitles', async (req, res) => {
+  const { videoUrl, subtitles } = req.body;
+  
+  if (!videoUrl || !subtitles || !Array.isArray(subtitles)) {
+    return res.status(400).json({ error: 'videoUrl and subtitles array required' });
+  }
+  
+  console.log('[burn-hook-subtitles] Processing:', videoUrl, 'subtitles:', subtitles.length);
+  
+  const workDir = `/tmp/${require('uuid').v4()}_burn`;
+  const fs = require('fs');
+  fs.mkdirSync(workDir, { recursive: true });
+  
+  const inputPath = path.join(workDir, 'input.mp4');
+  const outputPath = path.join(workDir, 'output.mp4');
+  
+  try {
+    // Download video
+    const videoRes = await fetch(videoUrl);
+    if (!videoRes.ok) throw new Error(`Video download failed: ${videoRes.status}`);
+    const videoBuffer = await videoRes.arrayBuffer();
+    fs.writeFileSync(inputPath, Buffer.from(videoBuffer));
+    console.log('[burn-hook-subtitles] Video downloaded');
+    
+    // Build drawtext filters for each subtitle
+    // Zero-delay appearance, bold white text, center screen, drop shadow
+    const font = '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc';
+    const drawtextFilters = subtitles.map(sub => {
+      const escapedText = sub.text.replace(/'/g, '').replace(/:/g, ' ').replace(/,/g, '\\,');
+      const endTime = sub.time + 1.5; // Show for 1.5 seconds
+      return `drawtext=fontfile='${font}':text='${escapedText}':fontcolor=white:fontsize=56:x=(w-text_w)/2:y=(h-text_h)/2:shadowcolor=black@0.8:shadowx=3:shadowy=3:enable='between(t,${sub.time},${endTime})'`;
+    }).join(',');
+    
+    console.log('[burn-hook-subtitles] Burning subtitles with FFmpeg...');
+    
+    // Burn subtitles using FFmpeg
+    const { execSync } = require('child_process');
+    execSync(`ffmpeg -y -i "${inputPath}" -vf "${drawtextFilters}" -c:v libx264 -preset veryfast -crf 23 -c:a copy "${outputPath}"`);
+    
+    // Upload to Supabase
+    const fileBuffer = fs.readFileSync(outputPath);
+    const fileName = `hooks/subtitled_${Date.now()}.mp4`;
+    await supabase.storage.from('generated-videos').upload(fileName, fileBuffer, { contentType: 'video/mp4', upsert: true });
+    const { data: urlData } = supabase.storage.from('generated-videos').getPublicUrl(fileName);
+    const finalVideoUrl = urlData.publicUrl;
+    
+    // Cleanup
+    fs.rmSync(workDir, { recursive: true, force: true });
+    
+    console.log('[burn-hook-subtitles] Success:', finalVideoUrl);
+    res.json({ success: true, videoUrl: finalVideoUrl });
+  } catch (err) {
+    console.error('[burn-hook-subtitles] error:', err.message);
+    res.status(500).json({ error: err.message });
   }
 });
