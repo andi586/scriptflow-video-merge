@@ -1446,13 +1446,13 @@ app.post('/api/add-bgm-to-video', async (req, res) => {
       await new Promise((resolve, reject) => {
         ffmpeg(videoPath)
           .input(bgmPath)
-          .complexFilter([
-            '[1:a]volume=0.3,aloop=loop=-1:size=2147483647[bgm]',
-            '[bgm]atrim=duration=5[bgm_trim]'
+          .outputOptions([
+            '-c:v copy',
+            '-c:a aac',
+            '-map 0:v:0',
+            '-map 1:a:0',
+            '-shortest'
           ])
-          .map('0:v')
-          .map('[bgm_trim]')
-          .outputOptions(['-c:v copy', '-c:a aac', '-shortest'])
           .save(outputPath)
           .on('end', resolve)
           .on('error', reject);
