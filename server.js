@@ -1353,8 +1353,13 @@ const EMOTIONS = {
 };
 
 async function generateOneEmotion(imageUrl, prompt) {
-  console.log('[generate-hook-emotion] Generating with prompt:', prompt.substring(0, 50) + '...');
-  const output = await replicate.run(
+  console.log('[replicate] starting generation...')
+  
+  const timeoutPromise = new Promise((_, reject) => 
+    setTimeout(() => reject(new Error('Replicate timeout after 90s')), 90000)
+  )
+  
+  const replicatePromise = replicate.run(
     "bytedance/seedance-1-lite",
     {
       input: {
@@ -1366,9 +1371,16 @@ async function generateOneEmotion(imageUrl, prompt) {
         camera_fixed: true
       }
     }
-  );
-  console.log('[replicate] raw output:', JSON.stringify(output));
-  return Array.isArray(output) ? output[0] : output;
+  )
+  
+  const output = await Promise.race([replicatePromise, timeoutPromise])
+  console.log('[replicate] raw output type:', typeof output)
+  console.log('[replicate] raw output:', JSON.stringify(output))
+  
+  if (typeof output === 'string') return output
+  if (Array.isArray(output)) return output[0]
+  if (output && output.url) return output.url
+  return String(output)
 }
 
 app.post('/api/generate-hook-emotion', async (req, res) => {
