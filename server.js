@@ -1346,36 +1346,47 @@ const TEMPLATE_EMOTION_MAP = {
 };
 
 const EMOTIONS = {
-  sad: `Close-up portrait, the person's face 
-already showing intense heartbreak, 
-eyes glistening with tears about to fall, 
-jaw slightly trembling, 
-caught in the exact moment of devastating realization, 
-cinematic lighting, ultra realistic, 
-emotion already at peak - not building up.`,
+  sad: `Extreme close-up portrait, 
+face frozen in devastating heartbreak, 
+tears streaming down cheeks, 
+eyes red and glistening, 
+lips trembling uncontrollably, 
+caught in the most painful moment of realization, 
+raw emotion exploding from first frame, 
+cinematic dramatic lighting, 
+ultra realistic, 
+no holding back - full emotional breakdown visible.`,
 
-  scared: `Close-up portrait, the person's face 
-frozen in pure fear, 
-eyes wide open in shock, 
-caught in the split second of terrifying discovery, 
-slight head movement back, 
-cinematic lighting, ultra realistic,
-emotion already exploded - not building up.`,
+  scared: `Extreme close-up portrait,
+face paralyzed in absolute terror,
+eyes stretched wide open in pure shock,
+pupils dilated with fear,
+mouth slightly open,
+body frozen in the split second of nightmare discovery,
+heart-stopping moment captured,
+cinematic dramatic lighting,
+ultra realistic,
+maximum fear from the very first frame.`,
 
-  surprised: `Close-up portrait, the person's face 
-in absolute shock, 
-mouth slightly open, 
-eyes wide with disbelief, 
-caught at the peak moment of stunning revelation, 
-cinematic lighting, ultra realistic,
-maximum emotional impact from first frame.`,
+  surprised: `Extreme close-up portrait,
+face exploding in total shock and disbelief,
+eyes wide open, eyebrows raised to maximum,
+mouth open in stunned silence,
+veins of disbelief visible in expression,
+the exact millisecond of life-changing revelation,
+cinematic dramatic lighting,
+ultra realistic,
+jaw-dropping impact from first frame.`,
 
-  neutral: `Close-up portrait, the person with 
-intense knowing expression, 
-slight mysterious smile, 
-eyes that have seen something,
-cinematic lighting, ultra realistic,
-compelling and magnetic from first frame.`
+  neutral: `Extreme close-up portrait,
+face with intense piercing gaze,
+eyes that carry dark secrets,
+subtle smirk hiding dangerous knowledge,
+magnetic and unsettling presence,
+the look of someone who knows everything,
+cinematic noir lighting,
+ultra realistic,
+commanding attention from first frame.`
 };
 
 async function generateOneEmotion(imageUrl, prompt) {
