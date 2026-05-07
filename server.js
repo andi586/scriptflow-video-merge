@@ -1613,7 +1613,7 @@ app.post('/api/process-hook', async (req, res) => {
           '-b:a', '192k',
           '-map', '0:v:0',
           '-map', '1:a:0',
-          '-shortest'
+          '-t', '15'
         ])
         .save(withBgmPath)
         .on('end', resolve)
