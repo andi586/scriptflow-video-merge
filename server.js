@@ -1511,6 +1511,14 @@ app.post('/api/add-bgm-to-video', async (req, res) => {
       .from('generated-videos')
       .getPublicUrl(fileName);
     
+    // Update movies table if movieId is provided
+    if (movieId) {
+      await supabase.from('movies')
+        .update({ hook_video_url: urlData.publicUrl })
+        .eq('id', movieId)
+      console.log('[add-bgm] Updated movie hook_video_url:', movieId)
+    }
+    
     console.log('[add-bgm] Success:', urlData.publicUrl);
     res.json({ success: true, videoUrl: urlData.publicUrl });
   } catch (err) {
