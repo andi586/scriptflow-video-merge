@@ -1346,56 +1346,32 @@ const TEMPLATE_EMOTION_MAP = {
 };
 
 const EMOTIONS = {
-  sad: `Close-up portrait video of the same person 
-from the input image,
-caught in the exact moment of receiving devastating news,
-eyes glistening with unshed tears,
-jaw slightly tight holding back emotion,
-the 3 seconds before completely breaking down,
-breathing slightly unsteady,
-NOT performing - actually feeling it,
-cinematic close-up, shallow depth of field,
-warm soft backlight, ultra realistic.`,
+  neutral: `A cinematic close-up portrait of the same person 
+from the reference photo. Neutral face, still eyes, 
+subtle breathing, tense silence, shallow depth of field, 
+realistic skin, no face change, no smile, no talking.`,
 
-  scared: `Close-up portrait video of the same person
-from the input image,
-caught in the split second of discovering something terrifying,
-eyes widened with adrenaline,
-body instinctively going still,
-the frozen moment before fight or flight,
-micro-expressions of fear crossing the face,
-NOT performing - actually experiencing it,
-cinematic close-up, dramatic side lighting,
-ultra realistic.`,
+  surprised: `A cinematic close-up portrait of the same person 
+from the reference photo. The person suddenly looks shocked, 
+eyes widen, mouth slightly opens, quick emotional reaction, 
+realistic expression, no face change, no talking.`,
 
-  surprised: `Close-up portrait video of the same person
-from the input image,
-caught in the exact millisecond of shocking revelation,
-eyes going wide involuntarily,
-slight sharp intake of breath visible,
-the face processing something impossible,
-genuine disbelief written on every feature,
-NOT performing - actually shocked,
-cinematic close-up, ultra realistic.`,
+  scared: `A cinematic close-up portrait of the same person 
+from the reference photo. The person looks terrified, 
+eyes trembling, breathing fast, frozen in fear, 
+dramatic lighting, realistic fear expression, 
+no face change, no talking.`,
 
-  angry: `Close-up portrait video of the same person
-from the input image,
-caught in the moment of realizing deep betrayal,
-jaw tightening, eyes hardening,
-controlled rage barely contained,
-the calm before the storm expression,
-NOT performing - actually furious,
-cinematic close-up, cold dramatic lighting,
-ultra realistic.`,
+  sad: `A cinematic close-up portrait of the same person 
+from the reference photo. The person looks heartbroken, 
+eyes wet, holding back tears, subtle sadness, 
+emotional silence, realistic face, no face change, no talking.`,
 
-  neutral: `Close-up portrait video of the same person
-from the input image,
-intense knowing gaze directly at camera,
-slight tension around the eyes,
-someone who knows something you don't,
-magnetic unsettling presence,
-cinematic close-up, mysterious lighting,
-ultra realistic.`
+  angry: `A cinematic close-up portrait of the same person
+from the reference photo. The person looks deeply betrayed,
+jaw tightening, eyes hardening with controlled fury,
+the calm before the storm, realistic anger,
+no face change, no talking.`
 };
 
 async function generateOneEmotion(imageUrl, prompt) {
@@ -1406,7 +1382,7 @@ async function generateOneEmotion(imageUrl, prompt) {
   )
   
   const replicatePromise = replicate.run(
-    "bytedance/seedance-1-lite",
+    "bytedance/seedance-1-pro",
     {
       input: {
         prompt,
