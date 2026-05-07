@@ -1346,10 +1346,36 @@ const TEMPLATE_EMOTION_MAP = {
 };
 
 const EMOTIONS = {
-  sad: `A close-up portrait video of the same person from the input image, very subtle facial emotion change to sad, minimal movement, natural blinking, cinematic lighting.`,
-  surprised: `A close-up portrait video of the same person from the input image becoming surprised, eyes widening, minimal movement, natural blinking.`,
-  scared: `A close-up portrait video of the same person from the input image becoming scared, tense expression, subtle fear, minimal movement.`,
-  neutral: `A calm neutral face of the same person from the input image, minimal movement, slight blinking.`
+  sad: `Close-up portrait, the person's face 
+already showing intense heartbreak, 
+eyes glistening with tears about to fall, 
+jaw slightly trembling, 
+caught in the exact moment of devastating realization, 
+cinematic lighting, ultra realistic, 
+emotion already at peak - not building up.`,
+
+  scared: `Close-up portrait, the person's face 
+frozen in pure fear, 
+eyes wide open in shock, 
+caught in the split second of terrifying discovery, 
+slight head movement back, 
+cinematic lighting, ultra realistic,
+emotion already exploded - not building up.`,
+
+  surprised: `Close-up portrait, the person's face 
+in absolute shock, 
+mouth slightly open, 
+eyes wide with disbelief, 
+caught at the peak moment of stunning revelation, 
+cinematic lighting, ultra realistic,
+maximum emotional impact from first frame.`,
+
+  neutral: `Close-up portrait, the person with 
+intense knowing expression, 
+slight mysterious smile, 
+eyes that have seen something,
+cinematic lighting, ultra realistic,
+compelling and magnetic from first frame.`
 };
 
 async function generateOneEmotion(imageUrl, prompt) {
@@ -1368,7 +1394,7 @@ async function generateOneEmotion(imageUrl, prompt) {
         duration: 5,
         resolution: "720p",
         fps: 24,
-        camera_fixed: true
+        camera_fixed: false
       }
     }
   )
@@ -1483,6 +1509,62 @@ app.post('/api/add-bgm-to-video', async (req, res) => {
     fs.rmSync(workDir, { recursive: true, force: true });
   }
 });
+
+// ─── POST /api/burn-subtitle ─────────────────────────────────────────────────
+// Burns a single subtitle onto a video (for final movie ending line)
+// Body: { videoUrl: string, subtitle: string, startTime?: number, duration?: number }
+// Returns: { success: true, videoUrl: string }
+app.post('/api/burn-subtitle', async (req, res) => {
+  const { videoUrl, subtitle, startTime = 11, duration = 4 } = req.body
+  
+  if (!videoUrl || !subtitle) {
+    return res.status(400).json({ error: 'videoUrl and subtitle required' })
+  }
+  
+  const id = require('uuid').v4()
+  const workDir = `/tmp/${id}_sub`
+  const fs = require('fs')
+  fs.mkdirSync(workDir, { recursive: true })
+  
+  try {
+    const videoPath = path.join(workDir, 'input.mp4')
+    await download(videoUrl, videoPath)
+    const outputPath = path.join(workDir, 'output.mp4')
+    
+    const font = '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc'
+    const escapedSubtitle = subtitle.replace(/'/g, "\\'")
+    
+    await new Promise((resolve, reject) => {
+      ffmpeg(videoPath)
+        .videoFilters(
+          `drawtext=fontfile='${font}':text='${escapedSubtitle}':` +
+          `fontsize=36:fontcolor=white:` +
+          `x=(w-tw)/2:y=h-150:` +
+          `shadowcolor=black:shadowx=2:shadowy=2:` +
+          `enable='between(t,${startTime},${startTime + duration})'`
+        )
+        .outputOptions(['-c:a copy'])
+        .save(outputPath)
+        .on('end', resolve)
+        .on('error', reject)
+    })
+    
+    const fileName = `subtitled/sub_${Date.now()}.mp4`
+    const fileBuffer = fs.readFileSync(outputPath)
+    await supabase.storage.from('generated-videos')
+      .upload(fileName, fileBuffer, { contentType: 'video/mp4', upsert: true })
+    const { data: urlData } = supabase.storage
+      .from('generated-videos').getPublicUrl(fileName)
+    
+    console.log('[burn-subtitle] Success:', urlData.publicUrl)
+    res.json({ success: true, videoUrl: urlData.publicUrl })
+  } catch (err) {
+    console.error('[burn-subtitle] error:', err)
+    res.status(500).json({ error: err.message })
+  } finally {
+    fs.rmSync(workDir, { recursive: true, force: true })
+  }
+})
 
 // ─── POST /api/burn-hook-subtitles ───────────────────────────────────────────
 // Burns subtitles onto a hook video with zero-delay emotional impact
