@@ -1570,6 +1570,109 @@ app.post('/api/burn-subtitle', async (req, res) => {
   }
 })
 
+// ─── POST /api/process-hook ──────────────────────────────────────────────────
+// Processes hook video: adds BGM + burns subtitles + updates database
+// Body: { videoUrl: string, bgmUrl: string, subtitles: Array<{time: number, text: string}>, movieId: string }
+// Returns: { success: true, status: 'processing' } immediately, then processes in background
+app.post('/api/process-hook', async (req, res) => {
+  const { videoUrl, bgmUrl, subtitles, movieId } = req.body;
+  
+  if (!videoUrl || !bgmUrl || !movieId) {
+    return res.status(400).json({ error: 'videoUrl, bgmUrl, and movieId required' });
+  }
+  
+  // Respond immediately
+  res.json({ success: true, status: 'processing' });
+  
+  // Then process in background
+  const workDir = `/tmp/${movieId}_process`;
+  const fs = require('fs');
+  
+  try {
+    fs.mkdirSync(workDir, { recursive: true });
+    
+    const videoPath = path.join(workDir, 'input.mp4');
+    const bgmPath = path.join(workDir, 'bgm.mp3');
+    const withBgmPath = path.join(workDir, 'with_bgm.mp4');
+    const finalPath = path.join(workDir, 'final.mp4');
+    
+    console.log('[process-hook] Starting for movieId:', movieId);
+    
+    // Download video and BGM
+    await download(videoUrl, videoPath);
+    await download(bgmUrl, bgmPath);
+    console.log('[process-hook] Downloaded video and BGM');
+    
+    // Add BGM
+    await new Promise((resolve, reject) => {
+      ffmpeg(videoPath)
+        .input(bgmPath)
+        .outputOptions([
+          '-c:v', 'copy',
+          '-c:a', 'aac',
+          '-b:a', '192k',
+          '-map', '0:v:0',
+          '-map', '1:a:0',
+          '-shortest'
+        ])
+        .save(withBgmPath)
+        .on('end', resolve)
+        .on('error', reject);
+    });
+    console.log('[process-hook] BGM added');
+    
+    // Burn subtitles if provided
+    if (subtitles && Array.isArray(subtitles) && subtitles.length > 0) {
+      const font = '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc';
+      const drawtextFilters = subtitles.map(sub => {
+        const escapedText = sub.text.replace(/'/g, '').replace(/:/g, ' ').replace(/,/g, '\\,');
+        const endTime = sub.time + 1.5;
+        return `drawtext=fontfile='${font}':text='${escapedText}':fontcolor=white:fontsize=56:x=(w-text_w)/2:y=(h-th-100):shadowcolor=black@0.8:shadowx=3:shadowy=3:enable='between(t,${sub.time},${endTime})'`;
+      }).join(',');
+      
+      await new Promise((resolve, reject) => {
+        ffmpeg(withBgmPath)
+          .videoFilters(drawtextFilters)
+          .outputOptions(['-c:a', 'copy'])
+          .save(finalPath)
+          .on('end', resolve)
+          .on('error', reject);
+      });
+      console.log('[process-hook] Subtitles burned');
+    } else {
+      fs.copyFileSync(withBgmPath, finalPath);
+      console.log('[process-hook] No subtitles, using BGM video');
+    }
+    
+    // Upload to Supabase
+    const fileName = `hooks/processed_${Date.now()}.mp4`;
+    const fileBuffer = fs.readFileSync(finalPath);
+    await supabase.storage.from('generated-videos')
+      .upload(fileName, fileBuffer, { contentType: 'video/mp4', upsert: true });
+    
+    const { data: urlData } = supabase.storage
+      .from('generated-videos').getPublicUrl(fileName);
+    
+    // Update movies table
+    await supabase.from('movies')
+      .update({ hook_video_url: urlData.publicUrl })
+      .eq('id', movieId);
+    
+    console.log('[process-hook] ✅ Complete:', urlData.publicUrl);
+    
+    // Cleanup
+    fs.rmSync(workDir, { recursive: true, force: true });
+  } catch (err) {
+    console.error('[process-hook] error:', err);
+    // Cleanup on error
+    try {
+      fs.rmSync(workDir, { recursive: true, force: true });
+    } catch (cleanupErr) {
+      console.error('[process-hook] cleanup error:', cleanupErr);
+    }
+  }
+});
+
 // ─── POST /api/burn-hook-subtitles ───────────────────────────────────────────
 // Burns subtitles onto a hook video with zero-delay emotional impact
 // Body: { videoUrl: string, subtitles: Array<{time: number, text: string}> }
