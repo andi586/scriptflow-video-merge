@@ -1575,7 +1575,7 @@ app.post('/api/burn-subtitle', async (req, res) => {
 // Body: { videoUrl: string, bgmUrl: string, subtitles: Array<{time: number, text: string}>, movieId: string }
 // Returns: { success: true, status: 'processing' } immediately, then processes in background
 app.post('/api/process-hook', async (req, res) => {
-  const { videoUrl, bgmUrl, subtitles, movieId } = req.body;
+  const { videoUrl, bgmUrl, audioUrls, subtitles, movieId } = req.body;
   
   if (!videoUrl || !bgmUrl || !movieId) {
     return res.status(400).json({ error: 'videoUrl, bgmUrl, and movieId required' });
@@ -1593,8 +1593,7 @@ app.post('/api/process-hook', async (req, res) => {
     
     const videoPath = path.join(workDir, 'input.mp4');
     const bgmPath = path.join(workDir, 'bgm.mp3');
-    const withBgmPath = path.join(workDir, 'with_bgm.mp4');
-    const finalPath = path.join(workDir, 'final.mp4');
+    let currentVideoPath = videoPath;
     
     console.log('[process-hook] Starting for movieId:', movieId);
     
@@ -1603,9 +1602,89 @@ app.post('/api/process-hook', async (req, res) => {
     await download(bgmUrl, bgmPath);
     console.log('[process-hook] Downloaded video and BGM');
     
-    // Add BGM
+    // If audioUrls provided, mix dialogue audio with video first
+    if (audioUrls && Array.isArray(audioUrls) && audioUrls.length > 0) {
+      console.log('[process-hook] Mixing dialogue audio with video...');
+      
+      // Download all audio files
+      const audioPaths = [];
+      for (let i = 0; i < audioUrls.length; i++) {
+        const audioPath = path.join(workDir, `audio_${i}.mp3`);
+        await download(audioUrls[i], audioPath);
+        audioPaths.push(audioPath);
+      }
+      
+      // Create silence file (0.5 seconds)
+      const silencePath = path.join(workDir, 'silence.mp3');
+      await new Promise((resolve, reject) => {
+        const { spawn } = require('child_process');
+        const args = [
+          '-f', 'lavfi',
+          '-i', 'anullsrc=r=48000:cl=stereo',
+          '-t', '0.5',
+          '-c:a', 'libmp3lame',
+          '-y',
+          silencePath
+        ];
+        const proc = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+        let stderr = '';
+        proc.stderr.on('data', (d) => { stderr += d.toString(); });
+        proc.on('close', (code) => {
+          if (code === 0) resolve();
+          else reject(new Error('Silence generation failed: ' + stderr.slice(-300)));
+        });
+      });
+      
+      // Build concat list with silence between audio files
+      const concatAudioPath = path.join(workDir, 'concat_audio.mp3');
+      const audioListPath = path.join(workDir, 'audio_list.txt');
+      const concatList = [];
+      for (let i = 0; i < audioPaths.length; i++) {
+        concatList.push(`file '${path.resolve(audioPaths[i]).replace(/'/g, "'\\''")}'`);
+        if (i < audioPaths.length - 1) {
+          // Add silence between lines (but not after last line)
+          concatList.push(`file '${path.resolve(silencePath).replace(/'/g, "'\\''")}'`);
+        }
+      }
+      fs.writeFileSync(audioListPath, concatList.join('\n'), 'utf8');
+      
+      // Concatenate audio files with silence
+      await new Promise((resolve, reject) => {
+        ffmpeg()
+          .input(audioListPath)
+          .inputOptions(['-f', 'concat', '-safe', '0'])
+          .outputOptions(['-c', 'copy'])
+          .save(concatAudioPath)
+          .on('end', resolve)
+          .on('error', reject);
+      });
+      
+      // Mix concatenated dialogue audio with video from beginning
+      const withAudioPath = path.join(workDir, 'with_audio.mp4');
+      await new Promise((resolve, reject) => {
+        ffmpeg(videoPath)
+          .input(concatAudioPath)
+          .outputOptions([
+            '-c:v', 'copy',
+            '-c:a', 'aac',
+            '-b:a', '192k',
+            '-map', '0:v:0',
+            '-map', '1:a:0',
+            '-shortest'
+          ])
+          .save(withAudioPath)
+          .on('end', resolve)
+          .on('error', reject);
+      });
+      
+      currentVideoPath = withAudioPath;
+      console.log('[process-hook] Dialogue audio mixed with 0.5s silence between lines');
+    }
+    
+    // Add BGM on top
+    const withBgmPath = path.join(workDir, 'with_bgm.mp4');
     await new Promise((resolve, reject) => {
-      ffmpeg(videoPath)
+      ffmpeg(currentVideoPath)
         .input(bgmPath)
         .outputOptions([
           '-c:v', 'copy',
@@ -1622,6 +1701,7 @@ app.post('/api/process-hook', async (req, res) => {
     console.log('[process-hook] BGM added');
     
     // Burn subtitles if provided
+    const finalPath = path.join(workDir, 'final.mp4');
     if (subtitles && Array.isArray(subtitles) && subtitles.length > 0) {
       const font = '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc';
       const drawtextFilters = subtitles.map(sub => {
