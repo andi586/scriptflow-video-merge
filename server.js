@@ -1382,7 +1382,7 @@ async function generateOneEmotion(imageUrl, prompt) {
   )
   
   const replicatePromise = replicate.run(
-    "bytedance/seedance-1-pro",
+    "bytedance/seedance-1-lite",
     {
       input: {
         prompt,
@@ -1626,8 +1626,10 @@ app.post('/api/process-hook', async (req, res) => {
       const font = '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc';
       const drawtextFilters = subtitles.map(sub => {
         const escapedText = sub.text.replace(/'/g, '').replace(/:/g, ' ').replace(/,/g, '\\,');
-        const endTime = sub.time + 1.5;
-        return `drawtext=fontfile='${font}':text='${escapedText}':fontcolor=white:fontsize=56:x=(w-text_w)/2:y=(h-th-100):shadowcolor=black@0.8:shadowx=3:shadowy=3:enable='between(t,${sub.time},${endTime})'`;
+        // Handle both formats: {time, text} or {startTime, endTime, text}
+        const startTime = sub.startTime || sub.time || 0;
+        const endTime = sub.endTime || (startTime + 1.5);
+        return `drawtext=fontfile='${font}':text='${escapedText}':fontcolor=white:fontsize=56:x=(w-text_w)/2:y=(h-th-100):shadowcolor=black@0.8:shadowx=3:shadowy=3:enable='between(t,${startTime},${endTime})'`;
       }).join(',');
       
       await new Promise((resolve, reject) => {
