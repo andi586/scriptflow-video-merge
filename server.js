@@ -1341,44 +1341,61 @@ const TEMPLATE_EMOTION_MAP = {
   'future_warning': 'scared',
   'last_person': 'sad',
   'group_chat': 'sad',
-  'friend_betrayal': 'surprised',
+  'friend_betrayal': 'angry',
   'breaking_news': 'surprised'
 };
 
 const EMOTIONS = {
-  sad: `Close-up portrait video of the same person,
-natural heartbreak expression,
-eyes slightly red and wet,
-holding back tears,
-the quiet moment before breaking down,
-real human emotion not theatrical,
-cinematic lighting, ultra realistic,
-same person from input image.`,
+  sad: `Close-up portrait video of the same person 
+from the input image,
+caught in the exact moment of receiving devastating news,
+eyes glistening with unshed tears,
+jaw slightly tight holding back emotion,
+the 3 seconds before completely breaking down,
+breathing slightly unsteady,
+NOT performing - actually feeling it,
+cinematic close-up, shallow depth of field,
+warm soft backlight, ultra realistic.`,
 
-  scared: `Close-up portrait video of the same person,
-natural fear response,
-eyes widened slightly,
-breath held,
-the split second of realizing something is wrong,
-real human reaction not theatrical,
-cinematic lighting, ultra realistic,
-same person from input image.`,
+  scared: `Close-up portrait video of the same person
+from the input image,
+caught in the split second of discovering something terrifying,
+eyes widened with adrenaline,
+body instinctively going still,
+the frozen moment before fight or flight,
+micro-expressions of fear crossing the face,
+NOT performing - actually experiencing it,
+cinematic close-up, dramatic side lighting,
+ultra realistic.`,
 
-  surprised: `Close-up portrait video of the same person,
-natural shock expression,
-eyes opening wide,
-slight involuntary head movement back,
-the genuine moment of disbelief,
-real human reaction not theatrical,
-cinematic lighting, ultra realistic,
-same person from input image.`,
+  surprised: `Close-up portrait video of the same person
+from the input image,
+caught in the exact millisecond of shocking revelation,
+eyes going wide involuntarily,
+slight sharp intake of breath visible,
+the face processing something impossible,
+genuine disbelief written on every feature,
+NOT performing - actually shocked,
+cinematic close-up, ultra realistic.`,
 
-  neutral: `Close-up portrait video of the same person,
-calm but knowing expression,
-subtle intensity in the eyes,
-slight natural head movement,
-cinematic lighting, ultra realistic,
-same person from input image.`
+  angry: `Close-up portrait video of the same person
+from the input image,
+caught in the moment of realizing deep betrayal,
+jaw tightening, eyes hardening,
+controlled rage barely contained,
+the calm before the storm expression,
+NOT performing - actually furious,
+cinematic close-up, cold dramatic lighting,
+ultra realistic.`,
+
+  neutral: `Close-up portrait video of the same person
+from the input image,
+intense knowing gaze directly at camera,
+slight tension around the eyes,
+someone who knows something you don't,
+magnetic unsettling presence,
+cinematic close-up, mysterious lighting,
+ultra realistic.`
 };
 
 async function generateOneEmotion(imageUrl, prompt) {
