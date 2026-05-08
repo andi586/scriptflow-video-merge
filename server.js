@@ -1879,12 +1879,12 @@ app.post('/api/finalize-movie', async (req, res) => {
           ffmpeg(videoPath)
             .input(bgmPath)
             .outputOptions([
-              '-c:v', 'copy',
-              '-c:a', 'aac',
-              '-map', '0:v:0',
-              '-map', '1:a:0',
+              '-c:v copy',
+              '-c:a aac',
+              '-map 0:v:0',
+              '-map 1:a:0',
               '-shortest',
-              '-t', '15'
+              '-t 15'
             ])
             .save(mergedPath)
             .on('end', resolve)
