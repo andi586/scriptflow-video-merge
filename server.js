@@ -1755,6 +1755,239 @@ app.post('/api/process-hook', async (req, res) => {
   }
 });
 
+// ─── POST /api/finalize-movie ────────────────────────────────────────────────
+// Handles all post-processing for final movie: TTS + merge + BGM + ending subtitle
+// Body: { videoUrl: string, movieId: string, archetype: string, dialogueLines: string[], bgmUrl: string }
+// Returns: { success: true, status: 'processing' } immediately, then processes in background
+
+// Helper function for ending lines
+function getEndingLine(archetype) {
+  const ENDING_LINES = {
+    'she_didnt_choose_you': "She saw everything.",
+    'lost_someone': "It had something to tell you.",
+    'last_person': "You shouldn't read this.",
+    'future_you': "You already made the wrong choice.",
+    'friend_betrayal': "And you trusted him.",
+    'what_could_have_been': "Look at what you lost.",
+    'breaking_news': "They're saying his name.",
+    'parallel_universe': "Some doors should stay closed.",
+    'phone_3am': "She saw everything.",
+    'future_warning': "You already made the wrong choice.",
+    'group_chat': "You shouldn't read this.",
+    'dog_last_words': "It had something to tell you.",
+    'pet_daily': "Every moment was a gift.",
+    'playful_chaos': "Life is better with you.",
+    'late_regret': "Some words come too late.",
+    'heartbreak': "Love doesn't always stay.",
+    'lonely_reflection': "Sometimes alone is better.",
+    'hero_moment': "This is who I was meant to be.",
+    'martial_arts': "Strength comes from within.",
+    'chase_escape': "Freedom has a price.",
+    'unspoken_love': "I should have said it.",
+    'reconciliation': "Forgiveness changes everything.",
+    'spring_festival': "Home is where the heart returns.",
+    'christmas': "Magic lives in the moments we share."
+  };
+  return ENDING_LINES[archetype] || null;
+}
+
+app.post('/api/finalize-movie', async (req, res) => {
+  const { videoUrl, movieId, archetype, dialogueLines, bgmUrl } = req.body;
+  
+  if (!videoUrl || !movieId) {
+    return res.status(400).json({ error: 'videoUrl and movieId required' });
+  }
+  
+  // Respond immediately
+  res.json({ success: true, status: 'processing' });
+  
+  const workDir = `/tmp/${movieId}_finalize`;
+  const fs = require('fs');
+  
+  (async () => {
+    try {
+      fs.mkdirSync(workDir, { recursive: true });
+      console.log('[finalize] Starting for movie:', movieId);
+      
+      // Step 1: Download Kling video
+      const videoPath = path.join(workDir, 'kling.mp4');
+      await download(videoUrl, videoPath);
+      console.log('[finalize] Step 1: Video downloaded');
+      
+      // Step 2: Generate ElevenLabs dialogue
+      const audioFiles = [];
+      if (dialogueLines && Array.isArray(dialogueLines) && dialogueLines.length > 0 && process.env.ELEVENLABS_API_KEY) {
+        console.log('[finalize] Step 2: Generating dialogue...');
+        for (let i = 0; i < dialogueLines.length; i++) {
+          const line = dialogueLines[i];
+          try {
+            const ttsRes = await fetch(
+              'https://api.elevenlabs.io/v1/text-to-speech/KdYTpVAufDTTk08g3eJi',
+              {
+                method: 'POST',
+                headers: {
+                  'xi-api-key': process.env.ELEVENLABS_API_KEY,
+                  'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                  text: line,
+                  model_id: 'eleven_turbo_v2',
+                  voice_settings: { stability: 0.5, similarity_boost: 0.75 }
+                })
+              }
+            );
+            if (!ttsRes.ok) {
+              console.warn(`[finalize] TTS failed for line ${i + 1}:`, ttsRes.status);
+              continue;
+            }
+            const audioBuffer = await ttsRes.arrayBuffer();
+            const audioPath = path.join(workDir, `line-${i}.mp3`);
+            fs.writeFileSync(audioPath, Buffer.from(audioBuffer));
+            audioFiles.push(audioPath);
+            console.log(`[finalize] Generated line ${i + 1}:`, line);
+          } catch (lineErr) {
+            console.warn(`[finalize] Line ${i + 1} failed:`, lineErr.message);
+          }
+        }
+        console.log('[finalize] Step 2: Dialogue generated', audioFiles.length, 'lines');
+      } else {
+        console.log('[finalize] Step 2: No dialogue lines, skipping TTS');
+      }
+      
+      // Step 3: Download BGM
+      const bgmPath = path.join(workDir, 'bgm.mp3');
+      let hasBgm = false;
+      if (bgmUrl) {
+        try {
+          await download(bgmUrl, bgmPath);
+          hasBgm = fs.existsSync(bgmPath);
+          console.log('[finalize] Step 3: BGM downloaded');
+        } catch (bgmErr) {
+          console.warn('[finalize] Step 3: BGM download failed:', bgmErr.message);
+        }
+      } else {
+        console.log('[finalize] Step 3: No BGM URL provided');
+      }
+      
+      // Step 4: Merge video + dialogue + BGM
+      const mergedPath = path.join(workDir, 'merged.mp4');
+      console.log('[finalize] Step 4: Merging video + dialogue + BGM...');
+      
+      await new Promise((resolve, reject) => {
+        let cmd = ffmpeg(videoPath);
+        
+        // Add dialogue files
+        for (const audioFile of audioFiles) {
+          cmd = cmd.input(audioFile);
+        }
+        
+        // Add BGM if exists
+        if (hasBgm) {
+          cmd = cmd.input(bgmPath);
+        }
+        
+        // Build filter complex
+        if (audioFiles.length > 0 && hasBgm) {
+          // Concat dialogue + mix with BGM
+          const concatFilter = audioFiles.map((_, i) => `[${i+1}:a]`).join('') + 
+            `concat=n=${audioFiles.length}:v=0:a=1[dialogue];` +
+            `[dialogue]volume=1.0[d];` +
+            `[${audioFiles.length+1}:a]volume=0.3,aloop=loop=-1:size=2147483647[bgm];` +
+            `[d][bgm]amix=inputs=2:duration=first[aout]`;
+          
+          cmd.complexFilter(concatFilter)
+            .map('0:v')
+            .map('[aout]');
+        } else if (audioFiles.length > 0) {
+          // Dialogue only
+          const concatFilter = audioFiles.map((_, i) => `[${i+1}:a]`).join('') + 
+            `concat=n=${audioFiles.length}:v=0:a=1[aout]`;
+          cmd.complexFilter(concatFilter)
+            .map('0:v')
+            .map('[aout]');
+        } else if (hasBgm) {
+          // BGM only
+          cmd.complexFilter(
+            `[1:a]volume=0.3,aloop=loop=-1:size=2147483647[aout]`
+          )
+            .map('0:v')
+            .map('[aout]');
+        } else {
+          // No audio processing, just copy
+          cmd.outputOptions(['-c copy']);
+        }
+        
+        if (audioFiles.length > 0 || hasBgm) {
+          cmd.outputOptions(['-c:v', 'copy', '-c:a', 'aac', '-ar', '48000', '-t', '15', '-shortest']);
+        }
+        
+        cmd.save(mergedPath)
+          .on('end', resolve)
+          .on('error', reject);
+      });
+      console.log('[finalize] Step 4: Merged');
+      
+      // Step 5: Burn ending subtitle
+      const endingLine = getEndingLine(archetype);
+      let finalPath = mergedPath;
+      
+      if (endingLine) {
+        console.log('[finalize] Step 5: Burning subtitle:', endingLine);
+        const subtitledPath = path.join(workDir, 'subtitled.mp4');
+        const font = '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc';
+        await new Promise((resolve, reject) => {
+          ffmpeg(mergedPath)
+            .videoFilters(
+              `drawtext=fontfile='${font}':text='${endingLine.replace(/'/g, "\\'")}':` +
+              `fontsize=36:fontcolor=white:` +
+              `x=(w-tw)/2:y=h-150:` +
+              `shadowcolor=black:shadowx=2:shadowy=2:` +
+              `enable='between(t,11,15)'`
+            )
+            .outputOptions(['-c:a', 'copy'])
+            .save(subtitledPath)
+            .on('end', resolve)
+            .on('error', reject);
+        });
+        finalPath = subtitledPath;
+        console.log('[finalize] Step 5: Subtitle burned');
+      } else {
+        console.log('[finalize] Step 5: No ending line for archetype:', archetype);
+      }
+      
+      // Step 6: Upload to Supabase
+      console.log('[finalize] Step 6: Uploading to Supabase...');
+      const fileName = `${movieId}/final-${Date.now()}.mp4`;
+      const fileBuffer = fs.readFileSync(finalPath);
+      await supabase.storage
+        .from('generated-videos')
+        .upload(fileName, fileBuffer, { contentType: 'video/mp4', upsert: true });
+      const { data: urlData } = supabase.storage
+        .from('generated-videos').getPublicUrl(fileName);
+      console.log('[finalize] Step 6: Uploaded:', urlData.publicUrl);
+      
+      // Step 7: Update database
+      await supabase.from('movies')
+        .update({ 
+          final_video_url: urlData.publicUrl,
+          status: 'complete'
+        })
+        .eq('id', movieId);
+      console.log('[finalize] Step 7: Database updated');
+      
+      console.log('[finalize] ✅ Complete:', urlData.publicUrl);
+      
+    } catch (err) {
+      console.error('[finalize] error:', err);
+      await supabase.from('movies')
+        .update({ status: 'failed' })
+        .eq('id', movieId);
+    } finally {
+      fs.rmSync(workDir, { recursive: true, force: true });
+    }
+  })();
+});
+
 // ─── POST /api/burn-hook-subtitles ───────────────────────────────────────────
 // Burns subtitles onto a hook video with zero-delay emotional impact
 // Body: { videoUrl: string, subtitles: Array<{time: number, text: string}> }
