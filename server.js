@@ -1873,58 +1873,74 @@ app.post('/api/finalize-movie', async (req, res) => {
       const mergedPath = path.join(workDir, 'merged.mp4');
       console.log('[finalize] Step 4: Merging video + dialogue + BGM...');
       
-      await new Promise((resolve, reject) => {
-        let cmd = ffmpeg(videoPath);
-        
-        // Add dialogue files
-        for (const audioFile of audioFiles) {
-          cmd = cmd.input(audioFile);
-        }
-        
-        // Add BGM if exists
-        if (hasBgm) {
-          cmd = cmd.input(bgmPath);
-        }
-        
-        // Build filter complex
-        if (audioFiles.length > 0 && hasBgm) {
-          // Concat dialogue + mix with BGM
-          const concatFilter = audioFiles.map((_, i) => `[${i+1}:a]`).join('') + 
-            `concat=n=${audioFiles.length}:v=0:a=1[dialogue];` +
-            `[dialogue]volume=1.0[d];` +
-            `[${audioFiles.length+1}:a]volume=0.3,aloop=loop=-1:size=2147483647[bgm];` +
-            `[d][bgm]amix=inputs=2:duration=first[aout]`;
+      if (audioFiles.length === 0 && hasBgm) {
+        // Simple BGM only merge
+        await new Promise((resolve, reject) => {
+          ffmpeg(videoPath)
+            .input(bgmPath)
+            .outputOptions([
+              '-c:v', 'copy',
+              '-c:a', 'aac',
+              '-map', '0:v:0',
+              '-map', '1:a:0',
+              '-shortest',
+              '-t', '15'
+            ])
+            .save(mergedPath)
+            .on('end', resolve)
+            .on('error', reject);
+        });
+      } else if (audioFiles.length === 0 && !hasBgm) {
+        // No audio at all, just copy video
+        await new Promise((resolve, reject) => {
+          ffmpeg(videoPath)
+            .outputOptions(['-c', 'copy'])
+            .save(mergedPath)
+            .on('end', resolve)
+            .on('error', reject);
+        });
+      } else {
+        // Complex case with dialogue (will implement later)
+        await new Promise((resolve, reject) => {
+          let cmd = ffmpeg(videoPath);
           
-          cmd.complexFilter(concatFilter)
-            .map('0:v')
-            .map('[aout]');
-        } else if (audioFiles.length > 0) {
-          // Dialogue only
-          const concatFilter = audioFiles.map((_, i) => `[${i+1}:a]`).join('') + 
-            `concat=n=${audioFiles.length}:v=0:a=1[aout]`;
-          cmd.complexFilter(concatFilter)
-            .map('0:v')
-            .map('[aout]');
-        } else if (hasBgm) {
-          // BGM only
-          cmd.complexFilter(
-            `[1:a]volume=0.3,aloop=loop=-1:size=2147483647[aout]`
-          )
-            .map('0:v')
-            .map('[aout]');
-        } else {
-          // No audio processing, just copy
-          cmd.outputOptions(['-c copy']);
-        }
-        
-        if (audioFiles.length > 0 || hasBgm) {
-          cmd.outputOptions(['-c:v', 'copy', '-c:a', 'aac', '-ar', '48000', '-t', '15', '-shortest']);
-        }
-        
-        cmd.save(mergedPath)
-          .on('end', resolve)
-          .on('error', reject);
-      });
+          // Add dialogue files
+          for (const audioFile of audioFiles) {
+            cmd = cmd.input(audioFile);
+          }
+          
+          // Add BGM if exists
+          if (hasBgm) {
+            cmd = cmd.input(bgmPath);
+          }
+          
+          // Build filter complex
+          if (audioFiles.length > 0 && hasBgm) {
+            // Concat dialogue + mix with BGM
+            const concatFilter = audioFiles.map((_, i) => `[${i+1}:a]`).join('') + 
+              `concat=n=${audioFiles.length}:v=0:a=1[dialogue];` +
+              `[dialogue]volume=1.0[d];` +
+              `[${audioFiles.length+1}:a]volume=0.3,aloop=loop=-1:size=2147483647[bgm];` +
+              `[d][bgm]amix=inputs=2:duration=first[aout]`;
+            
+            cmd.complexFilter(concatFilter)
+              .map('0:v')
+              .map('[aout]');
+          } else if (audioFiles.length > 0) {
+            // Dialogue only
+            const concatFilter = audioFiles.map((_, i) => `[${i+1}:a]`).join('') + 
+              `concat=n=${audioFiles.length}:v=0:a=1[aout]`;
+            cmd.complexFilter(concatFilter)
+              .map('0:v')
+              .map('[aout]');
+          }
+          
+          cmd.outputOptions(['-c:v', 'copy', '-c:a', 'aac', '-ar', '48000', '-t', '15', '-shortest'])
+            .save(mergedPath)
+            .on('end', resolve)
+            .on('error', reject);
+        });
+      }
       console.log('[finalize] Step 4: Merged');
       
       // Step 5: Burn ending subtitle
