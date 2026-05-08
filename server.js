@@ -1856,17 +1856,17 @@ app.post('/api/finalize-movie', async (req, res) => {
       
       // Step 3: Download BGM
       const bgmPath = path.join(workDir, 'bgm.mp3');
-      let hasBgm = false;
-      if (bgmUrl) {
+      const hasBgm = typeof bgmUrl === 'string' && bgmUrl.trim().length > 0;
+      
+      if (hasBgm) {
         try {
           await download(bgmUrl, bgmPath);
-          hasBgm = fs.existsSync(bgmPath);
           console.log('[finalize] Step 3: BGM downloaded');
         } catch (bgmErr) {
           console.warn('[finalize] Step 3: BGM download failed:', bgmErr.message);
         }
       } else {
-        console.log('[finalize] Step 3: No BGM URL provided');
+        console.log('[finalize] Step 3: No BGM');
       }
       
       // Step 4: Merge video + dialogue + BGM
