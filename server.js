@@ -1809,106 +1809,24 @@ app.post('/api/finalize-movie', async (req, res) => {
       fs.mkdirSync(workDir, { recursive: true });
       console.log('[finalize] Starting for movie:', movieId);
       
-      // Step 1: Download video
+      // Step 1: Download Kling video (keep original audio)
       const videoPath = path.join(workDir, 'input.mp4');
       await download(videoUrl, videoPath);
-      console.log('[finalize] Step 1: video downloaded');
+      console.log('[finalize] Step 1: Kling video downloaded (keeping original audio)');
 
-      // Step 2: Generate TTS for each dialogue line
-      const audioParts = [];
-      for (let i = 0; i < dialogueLines.length; i++) {
-        const line = dialogueLines[i];
-        const ttsRes = await fetch(
-          'https://api.elevenlabs.io/v1/text-to-speech/T7BErSAR6r6NDaGdTLKB',
-          {
-            method: 'POST',
-            headers: {
-              'xi-api-key': process.env.ELEVENLABS_API_KEY,
-              'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-              text: line,
-              model_id: 'eleven_turbo_v2',
-              voice_settings: { stability: 0.5, similarity_boost: 0.75 }
-            })
-          }
-        );
-        if (ttsRes.ok) {
-          const buf = await ttsRes.arrayBuffer();
-          const p = path.join(workDir, `tts-${i}.mp3`);
-          fs.writeFileSync(p, Buffer.from(buf));
-          audioParts.push(p);
-          console.log(`[finalize] Step 2: TTS line ${i+1} done`);
-        } else {
-          const err = await ttsRes.text();
-          console.warn(`[finalize] TTS line ${i+1} failed:`, ttsRes.status, err);
-        }
-      }
-
-      // Step 3: Concat TTS audio into one file
-      let voicePath = null;
-      if (audioParts.length > 0) {
-        voicePath = path.join(workDir, 'voice.mp3');
-        if (audioParts.length === 1) {
-          fs.copyFileSync(audioParts[0], voicePath);
-        } else {
-          const listFile = path.join(workDir, 'list.txt');
-          fs.writeFileSync(listFile, audioParts.map(p => `file '${p}'`).join('\n'));
-          await new Promise((resolve, reject) => {
-            ffmpeg()
-              .input(listFile)
-              .inputOptions(['-f concat', '-safe 0'])
-              .outputOptions(['-c:a libmp3lame'])
-              .save(voicePath)
-              .on('end', resolve)
-              .on('error', reject);
-          });
-        }
-        console.log('[finalize] Step 3: voice concat done');
-      }
-
-      // Step 4: Download BGM
+      // Step 2: Download BGM
       let bgmPath = null;
       if (bgmUrl) {
         bgmPath = path.join(workDir, 'bgm.mp3');
         await download(bgmUrl, bgmPath);
-        console.log('[finalize] Step 4: BGM downloaded');
+        console.log('[finalize] Step 2: BGM downloaded');
       }
 
-      // Step 5: Mix video + voice + BGM using FFmpeg
+      // Step 3: Mix Kling original audio + BGM
       const mixedPath = path.join(workDir, 'mixed.mp4');
 
-      if (voicePath && bgmPath) {
-        // Voice + BGM
-        await new Promise((resolve, reject) => {
-          ffmpeg(videoPath)
-            .input(voicePath)
-            .input(bgmPath)
-            .complexFilter([
-              '[1:a]volume=1.0[v]',
-              '[2:a]volume=0.15,aloop=loop=-1:size=2147483647[b]',
-              '[v][b]amix=inputs=2:duration=first[aout]'
-            ])
-            .outputOptions(['-map 0:v', '-map [aout]', '-c:v copy', '-c:a aac', '-t 15'])
-            .save(mixedPath)
-            .on('end', resolve)
-            .on('error', (err, stdout, stderr) => {
-              console.error('[finalize] FFmpeg mix error:', stderr);
-              reject(err);
-            });
-        });
-      } else if (voicePath) {
-        // Voice only
-        await new Promise((resolve, reject) => {
-          ffmpeg(videoPath)
-            .input(voicePath)
-            .outputOptions(['-map 0:v', '-map 1:a', '-c:v copy', '-c:a aac', '-t 15'])
-            .save(mixedPath)
-            .on('end', resolve)
-            .on('error', reject);
-        });
-      } else if (bgmPath) {
-        // BGM only: mix original video audio + BGM
+      if (bgmPath) {
+        // Mix original Kling audio (100%) + BGM (15%)
         await new Promise((resolve, reject) => {
           ffmpeg(videoPath)
             .input(bgmPath)
@@ -1920,15 +1838,19 @@ app.post('/api/finalize-movie', async (req, res) => {
             .outputOptions(['-map 0:v', '-map [aout]', '-c:v copy', '-c:a aac', '-t 15'])
             .save(mixedPath)
             .on('end', resolve)
-            .on('error', reject);
+            .on('error', (err, stdout, stderr) => {
+              console.error('[finalize] FFmpeg mix error:', stderr);
+              reject(err);
+            });
         });
+        console.log('[finalize] Step 3: Mixed Kling audio + BGM');
       } else {
-        // No audio
+        // No BGM: just copy video with original audio
         fs.copyFileSync(videoPath, mixedPath);
+        console.log('[finalize] Step 3: No BGM, using Kling video as-is');
       }
-      console.log('[finalize] Step 5: mix done');
 
-      // Step 6: Burn ending subtitle
+      // Step 4: Burn ending subtitle
       const ENDING_LINES = {
         'she_didnt_choose_you': "She saw everything.",
         'lost_someone': "It had something to tell you.",
@@ -1963,10 +1885,10 @@ app.post('/api/finalize-movie', async (req, res) => {
               resolve(null);
             });
         });
-        console.log('[finalize] Step 6: subtitle burned:', endingLine);
+        console.log('[finalize] Step 4: Subtitle burned:', endingLine);
       }
 
-      // Step 7: Upload to Supabase
+      // Step 5: Upload to Supabase
       const fileName = `${movieId}/final-${Date.now()}.mp4`;
       const fileBuffer = fs.readFileSync(finalPath);
       const { error: uploadError } = await supabase.storage
@@ -1978,7 +1900,7 @@ app.post('/api/finalize-movie', async (req, res) => {
       const { data: urlData } = supabase.storage
         .from('generated-videos').getPublicUrl(fileName);
 
-      // Step 8: Update database
+      // Step 6: Update database
       if (movieId && !movieId.startsWith('test')) {
         await supabase.from('movies')
           .update({
