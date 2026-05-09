@@ -1819,7 +1819,7 @@ app.post('/api/finalize-movie', async (req, res) => {
       for (let i = 0; i < dialogueLines.length; i++) {
         const line = dialogueLines[i];
         const ttsRes = await fetch(
-          'https://api.elevenlabs.io/v1/text-to-speech/YOq2y2Up4RgXP2HyXjE5',
+          'https://api.elevenlabs.io/v1/text-to-speech/T7BErSAR6r6NDaGdTLKB',
           {
             method: 'POST',
             headers: {
@@ -1908,11 +1908,16 @@ app.post('/api/finalize-movie', async (req, res) => {
             .on('error', reject);
         });
       } else if (bgmPath) {
-        // BGM only
+        // BGM only: mix original video audio + BGM
         await new Promise((resolve, reject) => {
           ffmpeg(videoPath)
             .input(bgmPath)
-            .outputOptions(['-map 0:v', '-map 1:a', '-c:v copy', '-c:a aac', '-shortest', '-t 15'])
+            .complexFilter([
+              '[0:a]volume=1.0[orig]',
+              '[1:a]volume=0.15,aloop=loop=-1:size=2147483647[bgm]',
+              '[orig][bgm]amix=inputs=2:duration=first[aout]'
+            ])
+            .outputOptions(['-map 0:v', '-map [aout]', '-c:v copy', '-c:a aac', '-t 15'])
             .save(mixedPath)
             .on('end', resolve)
             .on('error', reject);
