@@ -1837,7 +1837,8 @@ app.post('/api/finalize-movie', async (req, res) => {
               }
             );
             if (!ttsRes.ok) {
-              console.warn(`[finalize] TTS failed for line ${i + 1}:`, ttsRes.status);
+              const errBody = await ttsRes.text();
+              console.warn(`[finalize] TTS failed for line ${i + 1}:`, ttsRes.status, errBody);
               continue;
             }
             const audioBuffer = await ttsRes.arrayBuffer();
