@@ -1869,7 +1869,7 @@ app.post('/api/finalize-movie', async (req, res) => {
         await new Promise((resolve, reject) => {
           ffmpeg(mixedPath)
             .videoFilters(
-              `drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:` +
+              `drawtext=fontfile=/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc:` +
               `text='${endingLine.replace(/'/g, "\\'")}':` +
               `fontsize=36:fontcolor=white:` +
               `x=(w-tw)/2:y=h-120:` +
