@@ -1822,30 +1822,42 @@ app.post('/api/finalize-movie', async (req, res) => {
         console.log('[finalize] Step 2: BGM downloaded');
       }
 
-      // Step 3: Mix video + BGM (simple map, handles videos with or without audio)
+      // Step 3: Mix Kling original audio + BGM
       const mixedPath = path.join(workDir, 'mixed.mp4');
 
       if (bgmPath) {
-        // Add BGM - simple map approach (works even if video has no audio)
+        // Mix original Kling audio + BGM underneath
         await new Promise((resolve, reject) => {
           ffmpeg(videoPath)
             .input(bgmPath)
+            .complexFilter([
+              '[1:a]volume=0.15,aloop=loop=-1:size=2147483647[bgm]',
+              '[0:a][bgm]amix=inputs=2:duration=first[aout]'
+            ])
             .outputOptions([
               '-map 0:v',
-              '-map 1:a',
+              '-map [aout]',
               '-c:v copy',
               '-c:a aac',
-              '-t 15',
-              '-shortest'
+              '-t 15'
             ])
             .save(mixedPath)
             .on('end', resolve)
-            .on('error', (err, stdout, stderr) => {
-              console.error('[finalize] FFmpeg mix error:', stderr);
-              reject(err);
+            .on('error', async (err) => {
+              // If video has no audio, use BGM only
+              console.warn('[finalize] No original audio, using BGM only');
+              await new Promise((res, rej) => {
+                ffmpeg(videoPath)
+                  .input(bgmPath)
+                  .outputOptions(['-map 0:v', '-map 1:a', '-c:v copy', '-c:a aac', '-t 15', '-shortest'])
+                  .save(mixedPath)
+                  .on('end', res)
+                  .on('error', rej);
+              });
+              resolve(null);
             });
         });
-        console.log('[finalize] Step 3: Added BGM (video audio replaced)');
+        console.log('[finalize] Step 3: Mixed Kling audio + BGM');
       } else {
         // No BGM: just copy video as-is
         fs.copyFileSync(videoPath, mixedPath);
