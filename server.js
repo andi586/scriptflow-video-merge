@@ -1822,20 +1822,22 @@ app.post('/api/finalize-movie', async (req, res) => {
         console.log('[finalize] Step 2: BGM downloaded');
       }
 
-      // Step 3: Mix Kling original audio + BGM
+      // Step 3: Mix video + BGM (simple map, handles videos with or without audio)
       const mixedPath = path.join(workDir, 'mixed.mp4');
 
       if (bgmPath) {
-        // Mix original Kling audio (100%) + BGM (15%)
+        // Add BGM - simple map approach (works even if video has no audio)
         await new Promise((resolve, reject) => {
           ffmpeg(videoPath)
             .input(bgmPath)
-            .complexFilter([
-              '[0:a]volume=1.0[orig]',
-              '[1:a]volume=0.15,aloop=loop=-1:size=2147483647[bgm]',
-              '[orig][bgm]amix=inputs=2:duration=first[aout]'
+            .outputOptions([
+              '-map 0:v',
+              '-map 1:a',
+              '-c:v copy',
+              '-c:a aac',
+              '-t 15',
+              '-shortest'
             ])
-            .outputOptions(['-map 0:v', '-map [aout]', '-c:v copy', '-c:a aac', '-t 15'])
             .save(mixedPath)
             .on('end', resolve)
             .on('error', (err, stdout, stderr) => {
@@ -1843,9 +1845,9 @@ app.post('/api/finalize-movie', async (req, res) => {
               reject(err);
             });
         });
-        console.log('[finalize] Step 3: Mixed Kling audio + BGM');
+        console.log('[finalize] Step 3: Added BGM (video audio replaced)');
       } else {
-        // No BGM: just copy video with original audio
+        // No BGM: just copy video as-is
         fs.copyFileSync(videoPath, mixedPath);
         console.log('[finalize] Step 3: No BGM, using Kling video as-is');
       }
