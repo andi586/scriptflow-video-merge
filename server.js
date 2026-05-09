@@ -1900,45 +1900,49 @@ app.post('/api/finalize-movie', async (req, res) => {
             .on('end', resolve)
             .on('error', reject);
         });
-      } else {
-        // Complex case with dialogue (will implement later)
+      } else if (audioFiles.length > 0) {
+        // Dialogue case: concat dialogue files, then mix with video + BGM
         await new Promise((resolve, reject) => {
-          let cmd = ffmpeg(videoPath);
+          // Step 1: Create concat file for dialogue
+          const concatFilePath = path.join(workDir, 'concat.txt');
+          const concatContent = audioFiles.map(f => `file '${f}'`).join('\n');
+          fs.writeFileSync(concatFilePath, concatContent);
           
-          // Add dialogue files
-          for (const audioFile of audioFiles) {
-            cmd = cmd.input(audioFile);
-          }
+          const dialoguePath = path.join(workDir, 'dialogue.mp3');
           
-          // Add BGM if exists
-          if (hasBgm) {
-            cmd = cmd.input(bgmPath);
-          }
-          
-          // Build filter complex
-          if (audioFiles.length > 0 && hasBgm) {
-            // Concat dialogue + mix with BGM
-            const concatFilter = audioFiles.map((_, i) => `[${i+1}:a]`).join('') + 
-              `concat=n=${audioFiles.length}:v=0:a=1[dialogue];` +
-              `[dialogue]volume=1.0[d];` +
-              `[${audioFiles.length+1}:a]volume=0.3,aloop=loop=-1:size=2147483647[bgm];` +
-              `[d][bgm]amix=inputs=2:duration=first[aout]`;
-            
-            cmd.complexFilter(concatFilter)
-              .map('0:v')
-              .map('[aout]');
-          } else if (audioFiles.length > 0) {
-            // Dialogue only
-            const concatFilter = audioFiles.map((_, i) => `[${i+1}:a]`).join('') + 
-              `concat=n=${audioFiles.length}:v=0:a=1[aout]`;
-            cmd.complexFilter(concatFilter)
-              .map('0:v')
-              .map('[aout]');
-          }
-          
-          cmd.outputOptions(['-c:v', 'copy', '-c:a', 'aac', '-ar', '48000', '-t', '15', '-shortest'])
-            .save(mergedPath)
-            .on('end', resolve)
+          // Concat all dialogue
+          ffmpeg()
+            .input(concatFilePath)
+            .inputOptions(['-f', 'concat', '-safe', '0'])
+            .outputOptions(['-c:a', 'aac'])
+            .save(dialoguePath)
+            .on('end', () => {
+              // Step 2: Mix dialogue with video + BGM
+              const inputs = [videoPath, dialoguePath];
+              if (hasBgm) inputs.push(bgmPath);
+              
+              let cmd = ffmpeg();
+              inputs.forEach(i => cmd.input(i));
+              
+              if (hasBgm) {
+                cmd.complexFilter([
+                  '[1:a]volume=1.0[dialogue]',
+                  '[2:a]volume=0.2,aloop=loop=-1:size=2147483647[bgm]',
+                  '[dialogue][bgm]amix=inputs=2:duration=first[aout]'
+                ])
+                .map('0:v')
+                .map('[aout]');
+              } else {
+                cmd.complexFilter(['[1:a]volume=1.0[aout]'])
+                .map('0:v')
+                .map('[aout]');
+              }
+              
+              cmd.outputOptions(['-c:v copy', '-c:a aac', '-t 15'])
+                .save(mergedPath)
+                .on('end', resolve)
+                .on('error', reject);
+            })
             .on('error', reject);
         });
       }
