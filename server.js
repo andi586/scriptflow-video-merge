@@ -1822,7 +1822,7 @@ app.post('/api/finalize-movie', async (req, res) => {
           const line = dialogueLines[i];
           try {
             const ttsRes = await fetch(
-              'https://api.elevenlabs.io/v1/text-to-speech/KdYTpVAufDTTk08g3eJi',
+              'https://api.elevenlabs.io/v1/text-to-speech/YOq2y2Up4RgXP2HyXjE5',
               {
                 method: 'POST',
                 headers: {
