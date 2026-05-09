@@ -1809,193 +1809,180 @@ app.post('/api/finalize-movie', async (req, res) => {
       fs.mkdirSync(workDir, { recursive: true });
       console.log('[finalize] Starting for movie:', movieId);
       
-      // Step 1: Download Kling video
-      const videoPath = path.join(workDir, 'kling.mp4');
+      // Step 1: Download video
+      const videoPath = path.join(workDir, 'input.mp4');
       await download(videoUrl, videoPath);
-      console.log('[finalize] Step 1: Video downloaded');
-      
-      // Step 2: Generate ElevenLabs dialogue
-      const audioFiles = [];
-      if (dialogueLines && Array.isArray(dialogueLines) && dialogueLines.length > 0 && process.env.ELEVENLABS_API_KEY) {
-        console.log('[finalize] Step 2: Generating dialogue...');
-        for (let i = 0; i < dialogueLines.length; i++) {
-          const line = dialogueLines[i];
-          try {
-            const ttsRes = await fetch(
-              'https://api.elevenlabs.io/v1/text-to-speech/YOq2y2Up4RgXP2HyXjE5',
-              {
-                method: 'POST',
-                headers: {
-                  'xi-api-key': process.env.ELEVENLABS_API_KEY,
-                  'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({
-                  text: line,
-                  model_id: 'eleven_turbo_v2',
-                  voice_settings: { stability: 0.5, similarity_boost: 0.75 }
-                })
-              }
-            );
-            if (!ttsRes.ok) {
-              const errBody = await ttsRes.text();
-              console.warn(`[finalize] TTS failed for line ${i + 1}:`, ttsRes.status, errBody);
-              continue;
-            }
-            const audioBuffer = await ttsRes.arrayBuffer();
-            const audioPath = path.join(workDir, `line-${i}.mp3`);
-            fs.writeFileSync(audioPath, Buffer.from(audioBuffer));
-            audioFiles.push(audioPath);
-            console.log(`[finalize] Generated line ${i + 1}:`, line);
-          } catch (lineErr) {
-            console.warn(`[finalize] Line ${i + 1} failed:`, lineErr.message);
+      console.log('[finalize] Step 1: video downloaded');
+
+      // Step 2: Generate TTS for each dialogue line
+      const audioParts = [];
+      for (let i = 0; i < dialogueLines.length; i++) {
+        const line = dialogueLines[i];
+        const ttsRes = await fetch(
+          'https://api.elevenlabs.io/v1/text-to-speech/YOq2y2Up4RgXP2HyXjE5',
+          {
+            method: 'POST',
+            headers: {
+              'xi-api-key': process.env.ELEVENLABS_API_KEY,
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+              text: line,
+              model_id: 'eleven_turbo_v2',
+              voice_settings: { stability: 0.5, similarity_boost: 0.75 }
+            })
           }
+        );
+        if (ttsRes.ok) {
+          const buf = await ttsRes.arrayBuffer();
+          const p = path.join(workDir, `tts-${i}.mp3`);
+          fs.writeFileSync(p, Buffer.from(buf));
+          audioParts.push(p);
+          console.log(`[finalize] Step 2: TTS line ${i+1} done`);
+        } else {
+          const err = await ttsRes.text();
+          console.warn(`[finalize] TTS line ${i+1} failed:`, ttsRes.status, err);
         }
-        console.log('[finalize] Step 2: Dialogue generated', audioFiles.length, 'lines');
-      } else {
-        console.log('[finalize] Step 2: No dialogue lines, skipping TTS');
       }
-      
-      // Step 3: Download BGM
-      const bgmPath = path.join(workDir, 'bgm.mp3');
-      const hasBgm = typeof bgmUrl === 'string' && bgmUrl.trim().length > 0;
-      
-      if (hasBgm) {
-        try {
-          await download(bgmUrl, bgmPath);
-          console.log('[finalize] Step 3: BGM downloaded');
-        } catch (bgmErr) {
-          console.warn('[finalize] Step 3: BGM download failed:', bgmErr.message);
+
+      // Step 3: Concat TTS audio into one file
+      let voicePath = null;
+      if (audioParts.length > 0) {
+        voicePath = path.join(workDir, 'voice.mp3');
+        if (audioParts.length === 1) {
+          fs.copyFileSync(audioParts[0], voicePath);
+        } else {
+          const listFile = path.join(workDir, 'list.txt');
+          fs.writeFileSync(listFile, audioParts.map(p => `file '${p}'`).join('\n'));
+          await new Promise((resolve, reject) => {
+            ffmpeg()
+              .input(listFile)
+              .inputOptions(['-f concat', '-safe 0'])
+              .outputOptions(['-c:a libmp3lame'])
+              .save(voicePath)
+              .on('end', resolve)
+              .on('error', reject);
+          });
         }
-      } else {
-        console.log('[finalize] Step 3: No BGM');
+        console.log('[finalize] Step 3: voice concat done');
       }
-      
-      // Step 4: Merge video + dialogue + BGM
-      const mergedPath = path.join(workDir, 'merged.mp4');
-      console.log('[finalize] Step 4: Merging video + dialogue + BGM...');
-      
-      if (audioFiles.length === 0 && hasBgm) {
-        // Simple BGM only merge
+
+      // Step 4: Download BGM
+      let bgmPath = null;
+      if (bgmUrl) {
+        bgmPath = path.join(workDir, 'bgm.mp3');
+        await download(bgmUrl, bgmPath);
+        console.log('[finalize] Step 4: BGM downloaded');
+      }
+
+      // Step 5: Mix video + voice + BGM using FFmpeg
+      const mixedPath = path.join(workDir, 'mixed.mp4');
+
+      if (voicePath && bgmPath) {
+        // Voice + BGM
+        await new Promise((resolve, reject) => {
+          ffmpeg(videoPath)
+            .input(voicePath)
+            .input(bgmPath)
+            .complexFilter([
+              '[1:a]volume=1.0[v]',
+              '[2:a]volume=0.15,aloop=loop=-1:size=2147483647[b]',
+              '[v][b]amix=inputs=2:duration=first[aout]'
+            ])
+            .outputOptions(['-map 0:v', '-map [aout]', '-c:v copy', '-c:a aac', '-t 15'])
+            .save(mixedPath)
+            .on('end', resolve)
+            .on('error', (err, stdout, stderr) => {
+              console.error('[finalize] FFmpeg mix error:', stderr);
+              reject(err);
+            });
+        });
+      } else if (voicePath) {
+        // Voice only
+        await new Promise((resolve, reject) => {
+          ffmpeg(videoPath)
+            .input(voicePath)
+            .outputOptions(['-map 0:v', '-map 1:a', '-c:v copy', '-c:a aac', '-t 15'])
+            .save(mixedPath)
+            .on('end', resolve)
+            .on('error', reject);
+        });
+      } else if (bgmPath) {
+        // BGM only
         await new Promise((resolve, reject) => {
           ffmpeg(videoPath)
             .input(bgmPath)
-            .outputOptions([
-              '-c:v copy',
-              '-c:a aac',
-              '-map 0:v:0',
-              '-map 1:a:0',
-              '-shortest',
-              '-t 15'
-            ])
-            .save(mergedPath)
+            .outputOptions(['-map 0:v', '-map 1:a', '-c:v copy', '-c:a aac', '-shortest', '-t 15'])
+            .save(mixedPath)
             .on('end', resolve)
             .on('error', reject);
         });
-      } else if (audioFiles.length === 0 && !hasBgm) {
-        // No audio at all, just copy video
-        await new Promise((resolve, reject) => {
-          ffmpeg(videoPath)
-            .outputOptions(['-c', 'copy'])
-            .save(mergedPath)
-            .on('end', resolve)
-            .on('error', reject);
-        });
-      } else if (audioFiles.length > 0) {
-        // Dialogue case: concat dialogue files, then mix with video + BGM
-        await new Promise((resolve, reject) => {
-          // Step 1: Create concat file for dialogue
-          const concatFilePath = path.join(workDir, 'concat.txt');
-          const concatContent = audioFiles.map(f => `file '${f}'`).join('\n');
-          fs.writeFileSync(concatFilePath, concatContent);
-          
-          const dialoguePath = path.join(workDir, 'dialogue.mp3');
-          
-          // Concat all dialogue
-          ffmpeg()
-            .input(concatFilePath)
-            .inputOptions(['-f', 'concat', '-safe', '0'])
-            .outputOptions(['-c:a', 'aac'])
-            .save(dialoguePath)
-            .on('end', () => {
-              // Step 2: Mix dialogue with video + BGM
-              const inputs = [videoPath, dialoguePath];
-              if (hasBgm) inputs.push(bgmPath);
-              
-              let cmd = ffmpeg();
-              inputs.forEach(i => cmd.input(i));
-              
-              if (hasBgm) {
-                cmd.complexFilter([
-                  '[1:a]volume=1.0[dialogue]',
-                  '[2:a]volume=0.2,aloop=loop=-1:size=2147483647[bgm]',
-                  '[dialogue][bgm]amix=inputs=2:duration=first[aout]'
-                ])
-                .map('0:v')
-                .map('[aout]');
-              } else {
-                cmd.complexFilter(['[1:a]volume=1.0[aout]'])
-                .map('0:v')
-                .map('[aout]');
-              }
-              
-              cmd.outputOptions(['-c:v copy', '-c:a aac', '-t 15'])
-                .save(mergedPath)
-                .on('end', resolve)
-                .on('error', reject);
-            })
-            .on('error', reject);
-        });
+      } else {
+        // No audio
+        fs.copyFileSync(videoPath, mixedPath);
       }
-      console.log('[finalize] Step 4: Merged');
-      
-      // Step 5: Burn ending subtitle
-      const endingLine = getEndingLine(archetype);
-      let finalPath = mergedPath;
-      
+      console.log('[finalize] Step 5: mix done');
+
+      // Step 6: Burn ending subtitle
+      const ENDING_LINES = {
+        'she_didnt_choose_you': "She saw everything.",
+        'lost_someone': "It had something to tell you.",
+        'last_person': "You shouldn't read this.",
+        'future_you': "You already made the wrong choice.",
+        'friend_betrayal': "And you trusted him.",
+        'what_could_have_been': "Look at what you lost.",
+        'breaking_news': "They're saying his name.",
+        'parallel_universe': "Some doors should stay closed."
+      };
+      const endingLine = ENDING_LINES[archetype];
+      let finalPath = mixedPath;
+
       if (endingLine) {
-        console.log('[finalize] Step 5: Burning subtitle:', endingLine);
-        const subtitledPath = path.join(workDir, 'subtitled.mp4');
-        const font = '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc';
+        finalPath = path.join(workDir, 'final.mp4');
         await new Promise((resolve, reject) => {
-          ffmpeg(mergedPath)
+          ffmpeg(mixedPath)
             .videoFilters(
-              `drawtext=fontfile='${font}':text='${endingLine.replace(/'/g, "\\'")}':` +
+              `drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:` +
+              `text='${endingLine.replace(/'/g, "\\'")}':` +
               `fontsize=36:fontcolor=white:` +
-              `x=(w-tw)/2:y=h-150:` +
+              `x=(w-tw)/2:y=h-120:` +
               `shadowcolor=black:shadowx=2:shadowy=2:` +
               `enable='between(t,11,15)'`
             )
-            .outputOptions(['-c:a', 'copy'])
-            .save(subtitledPath)
+            .outputOptions(['-c:a copy'])
+            .save(finalPath)
             .on('end', resolve)
-            .on('error', reject);
+            .on('error', (err, stdout, stderr) => {
+              console.warn('[finalize] subtitle burn failed, using without:', stderr.slice(0, 200));
+              fs.copyFileSync(mixedPath, finalPath);
+              resolve(null);
+            });
         });
-        finalPath = subtitledPath;
-        console.log('[finalize] Step 5: Subtitle burned');
-      } else {
-        console.log('[finalize] Step 5: No ending line for archetype:', archetype);
+        console.log('[finalize] Step 6: subtitle burned:', endingLine);
       }
-      
-      // Step 6: Upload to Supabase
-      console.log('[finalize] Step 6: Uploading to Supabase...');
+
+      // Step 7: Upload to Supabase
       const fileName = `${movieId}/final-${Date.now()}.mp4`;
       const fileBuffer = fs.readFileSync(finalPath);
-      await supabase.storage
+      const { error: uploadError } = await supabase.storage
         .from('generated-videos')
         .upload(fileName, fileBuffer, { contentType: 'video/mp4', upsert: true });
+
+      if (uploadError) throw uploadError;
+
       const { data: urlData } = supabase.storage
         .from('generated-videos').getPublicUrl(fileName);
-      console.log('[finalize] Step 6: Uploaded:', urlData.publicUrl);
-      
-      // Step 7: Update database
-      await supabase.from('movies')
-        .update({ 
-          final_video_url: urlData.publicUrl,
-          status: 'complete'
-        })
-        .eq('id', movieId);
-      console.log('[finalize] Step 7: Database updated');
-      
+
+      // Step 8: Update database
+      if (movieId && !movieId.startsWith('test')) {
+        await supabase.from('movies')
+          .update({
+            final_video_url: urlData.publicUrl,
+            status: 'complete'
+          })
+          .eq('id', movieId);
+      }
+
       console.log('[finalize] ✅ Complete:', urlData.publicUrl);
       
     } catch (err) {
